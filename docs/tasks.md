@@ -41,16 +41,16 @@ This document contains an enumerated checklist of actionable tasks derived from 
 [x] 13. Create session event notification system
 
 ### 4. AMI Integration (Panoramisk)
-[ ] 14. Implement AMI connection manager with connection pooling
-[ ] 15. Create event handlers for:
-    - [ ] 15.1. Newchannel events for early call detection
-    - [ ] 15.2. Dial events for outbound call tracking
-    - [ ] 15.3. Hangup events for session cleanup
-    - [ ] 15.4. Bridge events for call bridging
-    - [ ] 15.5. VarSet events for custom variables
-[ ] 16. Implement automatic AMI reconnection and failover
-[ ] 17. Add AMI event filtering and tenant routing
-[ ] 18. Create AMI command execution with error handling
+[x] 14. Implement AMI connection manager with connection pooling
+[x] 15. Create event handlers for:
+    - [x] 15.1. Newchannel events for early call detection
+    - [x] 15.2. Dial events for outbound call tracking
+    - [x] 15.3. Hangup events for session cleanup
+    - [x] 15.4. Bridge events for call bridging
+    - [x] 15.5. VarSet events for custom variables
+[x] 16. Implement automatic AMI reconnection and failover
+[x] 17. Add AMI event filtering and tenant routing
+[x] 18. Create AMI command execution with error handling
 
 ## Phase 3: Call Control and Audio Processing
 
