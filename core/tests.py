@@ -21,6 +21,21 @@ from .ami_events import (
     cleanup_event_handler
 )
 from .session_manager import CallSessionData
+from .ari_manager import (
+    ARIConnectionConfig,
+    ARIConnectionStats,
+    ARIConnection,
+    ARIManager,
+    get_ari_manager,
+    cleanup_ari_manager
+)
+from .ari_events import (
+    ARIEventStats,
+    ARIEventHandler,
+    get_ari_event_handler,
+    setup_ari_event_handlers_for_tenant,
+    cleanup_ari_event_handler
+)
 
 
 class AMIConnectionConfigTest(TestCase):
@@ -553,5 +568,518 @@ class AMIEventHandlerGlobalTest(TestCase):
             
             # Final cleanup
             await cleanup_event_handler()
+        
+        asyncio.run(run_test())
+
+
+# ===============================
+# ARI Manager Tests
+# ===============================
+
+class ARIConnectionConfigTest(TestCase):
+    """Test ARI connection configuration dataclass."""
+    
+    def test_default_values(self):
+        """Test default configuration values."""
+        config = ARIConnectionConfig(
+            host='localhost',
+            port=8088,
+            username='asterisk',
+            password='asterisk'
+        )
+        self.assertEqual(config.host, 'localhost')
+        self.assertEqual(config.port, 8088)
+        self.assertEqual(config.username, 'asterisk')
+        self.assertEqual(config.password, 'asterisk')
+        self.assertEqual(config.app_name, 'aiMediaGateway')
+        self.assertEqual(config.timeout, 30)
+        self.assertEqual(config.max_retries, 3)
+        self.assertEqual(config.retry_delay, 5)
+    
+    def test_custom_values(self):
+        """Test custom configuration values."""
+        config = ARIConnectionConfig(
+            host='ari.example.com',
+            port=8089,
+            username='testuser',
+            password='testpass',
+            app_name='testapp',
+            timeout=45,
+            max_retries=5,
+            retry_delay=10
+        )
+        self.assertEqual(config.host, 'ari.example.com')
+        self.assertEqual(config.port, 8089)
+        self.assertEqual(config.username, 'testuser')
+        self.assertEqual(config.password, 'testpass')
+        self.assertEqual(config.app_name, 'testapp')
+        self.assertEqual(config.timeout, 45)
+        self.assertEqual(config.max_retries, 5)
+        self.assertEqual(config.retry_delay, 10)
+
+
+class ARIConnectionStatsTest(TestCase):
+    """Test ARI connection statistics dataclass."""
+    
+    def test_default_values(self):
+        """Test default statistics values."""
+        stats = ARIConnectionStats()
+        self.assertFalse(stats.connected)
+        self.assertIsNone(stats.connection_time)
+        self.assertIsNone(stats.last_activity)
+        self.assertEqual(stats.total_operations, 0)
+        self.assertEqual(stats.failed_operations, 0)
+        self.assertEqual(stats.reconnect_count, 0)
+    
+    def test_custom_values(self):
+        """Test custom statistics values."""
+        now = timezone.now()
+        stats = ARIConnectionStats(
+            connected=True,
+            connection_time=now,
+            last_activity=now,
+            total_operations=100,
+            failed_operations=5,
+            reconnect_count=2
+        )
+        self.assertTrue(stats.connected)
+        self.assertEqual(stats.connection_time, now)
+        self.assertEqual(stats.last_activity, now)
+        self.assertEqual(stats.total_operations, 100)
+        self.assertEqual(stats.failed_operations, 5)
+        self.assertEqual(stats.reconnect_count, 2)
+
+
+class ARIConnectionTest(TransactionTestCase):
+    """Test ARI connection class with async operations."""
+    
+    def setUp(self):
+        """Set up test data."""
+        self.tenant = Tenant.objects.create(
+            name="ARI Test Tenant",
+            subdomain="aritest",
+            is_active=True
+        )
+        self.config = ARIConnectionConfig(
+            host='localhost',
+            port=8088,
+            username='testuser',
+            password='testpass',
+            app_name='testapp',
+            timeout=10,
+            max_retries=2,
+            retry_delay=1
+        )
+    
+    def test_init(self):
+        """Test ARI connection initialization."""
+        connection = ARIConnection(str(self.tenant.id), self.config)
+        self.assertEqual(connection.tenant_id, str(self.tenant.id))
+        self.assertEqual(connection.config, self.config)
+        self.assertIsNone(connection.client)
+        self.assertIsInstance(connection.stats, ARIConnectionStats)
+        self.assertFalse(connection.stats.connected)
+        self.assertEqual(len(connection.event_handlers), 0)
+    
+    @patch('core.ari_manager.ari.connect')
+    def test_connect_success(self, mock_ari_connect):
+        """Test successful ARI connection."""
+        async def run_test():
+            # Mock ARI client
+            mock_client = Mock()
+            mock_client.asterisk.info.return_value = {'build': {'date': '2024-01-01'}}
+            mock_client.on_channel_event = Mock()
+            mock_ari_connect.return_value = mock_client
+            
+            connection = ARIConnection(str(self.tenant.id), self.config)
+            
+            # Mock the setup methods to avoid actual event setup
+            connection._setup_event_handlers = AsyncMock()
+            connection._start_health_check_task = Mock()
+            
+            result = await connection.connect()
+            
+            self.assertTrue(result)
+            self.assertTrue(connection.stats.connected)
+            self.assertIsNotNone(connection.stats.connection_time)
+            self.assertEqual(connection.client, mock_client)
+            mock_ari_connect.assert_called_once()
+        
+        asyncio.run(run_test())
+    
+    @patch('core.ari_manager.ari.connect')
+    def test_connect_failure(self, mock_ari_connect):
+        """Test ARI connection failure."""
+        async def run_test():
+            # Mock connection failure
+            mock_ari_connect.side_effect = Exception("Connection failed")
+            
+            connection = ARIConnection(str(self.tenant.id), self.config)
+            connection._schedule_reconnect = AsyncMock()
+            
+            result = await connection.connect()
+            
+            self.assertFalse(result)
+            self.assertFalse(connection.stats.connected)
+            self.assertIsNone(connection.client)
+            self.assertEqual(connection.stats.failed_operations, 2)  # max_retries attempts
+        
+        asyncio.run(run_test())
+    
+    def test_register_event_handler(self):
+        """Test event handler registration."""
+        connection = ARIConnection(str(self.tenant.id), self.config)
+        
+        # Mock handler function
+        mock_handler = Mock()
+        
+        # Register event handler
+        connection.register_event_handler('StasisStart', mock_handler)
+        
+        # Check that handler was registered
+        self.assertIn('StasisStart', connection.event_handlers)
+        self.assertEqual(connection.event_handlers['StasisStart'], mock_handler)
+    
+    def test_execute_operation_success(self):
+        """Test successful operation execution."""
+        async def run_test():
+            connection = ARIConnection(str(self.tenant.id), self.config)
+            
+            # Mock connected client
+            mock_client = Mock()
+            connection.client = mock_client
+            connection.stats.connected = True
+            
+            # Mock operation
+            mock_operation = Mock(return_value="success")
+            
+            result = await connection.execute_operation(mock_operation, "arg1", key="value")
+            
+            self.assertEqual(result, "success")
+            self.assertEqual(connection.stats.total_operations, 1)
+            self.assertIsNotNone(connection.stats.last_activity)
+        
+        asyncio.run(run_test())
+
+
+class ARIManagerTest(TransactionTestCase):
+    """Test ARI manager class with database operations."""
+    
+    def setUp(self):
+        """Set up test data."""
+        self.tenant = Tenant.objects.create(
+            name="ARI Manager Test Tenant",
+            subdomain="arimanager",
+            is_active=True
+        )
+        
+        # Create ARI configuration
+        SystemConfiguration.objects.create(
+            tenant=self.tenant,
+            key='ari_host',
+            value='localhost',
+            value_type='str'
+        )
+        SystemConfiguration.objects.create(
+            tenant=self.tenant,
+            key='ari_port',
+            value='8088',
+            value_type='int'
+        )
+        SystemConfiguration.objects.create(
+            tenant=self.tenant,
+            key='ari_username',
+            value='testuser',
+            value_type='str'
+        )
+        SystemConfiguration.objects.create(
+            tenant=self.tenant,
+            key='ari_password',
+            value='testpass',
+            value_type='str'
+        )
+    
+    def test_init(self):
+        """Test ARI manager initialization."""
+        manager = ARIManager()
+        self.assertEqual(len(manager.connections), 0)
+        self.assertIsNotNone(manager._lock)
+    
+    def test_get_connection_stats(self):
+        """Test connection statistics retrieval."""
+        manager = ARIManager()
+        stats = manager.get_connection_stats()
+        self.assertIsInstance(stats, dict)
+        self.assertEqual(len(stats), 0)
+    
+    async def test_get_tenant_ari_config(self):
+        """Test tenant ARI configuration loading."""
+        manager = ARIManager()
+        config = await manager._get_tenant_ari_config(str(self.tenant.id))
+        
+        self.assertIsNotNone(config)
+        self.assertIsInstance(config, ARIConnectionConfig)
+        self.assertEqual(config.host, 'localhost')
+        self.assertEqual(config.port, 8088)
+        self.assertEqual(config.username, 'testuser')
+        self.assertEqual(config.password, 'testpass')
+        self.assertEqual(config.app_name, f'aiMediaGateway_{self.tenant.id}')
+
+
+class ARIManagerGlobalTest(TestCase):
+    """Test global ARI manager functions."""
+    
+    def test_get_ari_manager(self):
+        """Test global ARI manager retrieval."""
+        # Get manager instance
+        manager1 = get_ari_manager()
+        self.assertIsInstance(manager1, ARIManager)
+        
+        # Should return same instance on subsequent calls
+        manager2 = get_ari_manager()
+        self.assertIs(manager1, manager2)
+        
+        # Cleanup
+        cleanup_ari_manager()
+    
+    def test_cleanup_ari_manager(self):
+        """Test ARI manager cleanup."""
+        # Get manager instance
+        manager = get_ari_manager()
+        self.assertIsNotNone(manager)
+        
+        # Cleanup
+        cleanup_ari_manager()
+        
+        # Should create new instance after cleanup
+        manager2 = get_ari_manager()
+        self.assertIsInstance(manager2, ARIManager)
+        
+        # Final cleanup
+        cleanup_ari_manager()
+
+
+# ===============================
+# ARI Event Handler Tests
+# ===============================
+
+class ARIEventStatsTest(TestCase):
+    """Test ARI event statistics dataclass."""
+    
+    def test_default_values(self):
+        """Test default statistics values."""
+        stats = ARIEventStats()
+        self.assertEqual(stats.stasis_start_events, 0)
+        self.assertEqual(stats.stasis_end_events, 0)
+        self.assertEqual(stats.channel_state_change_events, 0)
+        self.assertEqual(stats.bridge_created_events, 0)
+        self.assertEqual(stats.bridge_destroyed_events, 0)
+        self.assertEqual(stats.bridge_entered_events, 0)
+        self.assertEqual(stats.bridge_left_events, 0)
+        self.assertEqual(stats.recording_started_events, 0)
+        self.assertEqual(stats.recording_finished_events, 0)
+        self.assertEqual(stats.total_events_processed, 0)
+        self.assertEqual(stats.total_errors, 0)
+        self.assertIsNone(stats.last_event_time)
+    
+    def test_custom_values(self):
+        """Test custom statistics values."""
+        now = timezone.now()
+        stats = ARIEventStats(
+            stasis_start_events=10,
+            stasis_end_events=8,
+            channel_state_change_events=25,
+            total_events_processed=50,
+            total_errors=2,
+            last_event_time=now
+        )
+        self.assertEqual(stats.stasis_start_events, 10)
+        self.assertEqual(stats.stasis_end_events, 8)
+        self.assertEqual(stats.channel_state_change_events, 25)
+        self.assertEqual(stats.total_events_processed, 50)
+        self.assertEqual(stats.total_errors, 2)
+        self.assertEqual(stats.last_event_time, now)
+
+
+class ARIEventHandlerTest(TransactionTestCase):
+    """Test ARI event handler class."""
+    
+    def setUp(self):
+        """Set up test data."""
+        self.tenant = Tenant.objects.create(
+            name="ARI Event Test Tenant",
+            schema_name="arievent",
+            asterisk_host="localhost",
+            asterisk_ami_username="testuser",
+            asterisk_ami_secret="testpass",
+            asterisk_ari_username="testuser",
+            asterisk_ari_password="testpass",
+            is_active=True
+        )
+        self.handler = ARIEventHandler()
+    
+    def test_init(self):
+        """Test ARI event handler initialization."""
+        self.assertIsNotNone(self.handler.session_manager)
+        self.assertIsNotNone(self.handler.ari_manager)
+        self.assertIsInstance(self.handler.stats, ARIEventStats)
+        self.assertEqual(len(self.handler.custom_handlers), 0)
+    
+    def test_register_custom_handler(self):
+        """Test custom event handler registration."""
+        # Mock handler function
+        mock_handler = Mock()
+        
+        # Register handler
+        self.handler.register_custom_handler('StasisStart', mock_handler)
+        
+        # Verify registration
+        self.assertIn('StasisStart', self.handler.custom_handlers)
+        self.assertIn(mock_handler, self.handler.custom_handlers['StasisStart'])
+    
+    def test_unregister_custom_handler(self):
+        """Test custom event handler unregistration."""
+        # Mock handler function
+        mock_handler = Mock()
+        
+        # Register and then unregister
+        self.handler.register_custom_handler('StasisStart', mock_handler)
+        self.handler.unregister_custom_handler('StasisStart', mock_handler)
+        
+        # Verify unregistration
+        self.assertEqual(len(self.handler.custom_handlers['StasisStart']), 0)
+    
+    def test_get_statistics(self):
+        """Test statistics retrieval."""
+        stats = self.handler.get_statistics()
+        self.assertIsInstance(stats, ARIEventStats)
+        self.assertEqual(stats.total_events_processed, 0)
+    
+    def test_map_channel_state_to_status(self):
+        """Test channel state mapping."""
+        # Test various state mappings
+        self.assertEqual(self.handler._map_channel_state_to_status('Up'), 'answered')
+        self.assertEqual(self.handler._map_channel_state_to_status('Down'), 'completed')
+        self.assertEqual(self.handler._map_channel_state_to_status('Ringing'), 'ringing')
+        self.assertEqual(self.handler._map_channel_state_to_status('Busy'), 'busy')
+        self.assertEqual(self.handler._map_channel_state_to_status('Unknown'), 'unknown')
+        self.assertEqual(self.handler._map_channel_state_to_status('InvalidState'), 'unknown')
+    
+    def test_extract_tenant_from_channel(self):
+        """Test tenant extraction from channel."""
+        async def run_test():
+            # Mock channel with tenant in name
+            mock_channel = Mock()
+            mock_channel.name = 'PJSIP/user123-tenant_test123_inbound-00000001'
+            # Mock channelvars to return None so it falls back to name parsing
+            mock_channel.channelvars = Mock()
+            mock_channel.channelvars.get.return_value = None
+            
+            tenant_id = await self.handler._extract_tenant_from_channel(mock_channel)
+            self.assertEqual(tenant_id, 'test123')
+            
+            # Mock channel with tenant in context
+            mock_channel2 = Mock()
+            mock_channel2.name = 'PJSIP/user456-00000002'
+            mock_channel2.channelvars = Mock()
+            mock_channel2.channelvars.get.return_value = None
+            mock_channel2.dialplan = {'context': 'tenant_test456_context'}
+            
+            tenant_id2 = await self.handler._extract_tenant_from_channel(mock_channel2)
+            self.assertEqual(tenant_id2, 'test456')
+            
+            # Mock channel with no tenant info
+            mock_channel3 = Mock()
+            mock_channel3.name = 'PJSIP/user789-00000003'
+            mock_channel3.channelvars = Mock()
+            mock_channel3.channelvars.get.return_value = None
+            mock_channel3.dialplan = {'context': 'default'}
+            
+            tenant_id3 = await self.handler._extract_tenant_from_channel(mock_channel3)
+            self.assertIsNone(tenant_id3)
+        
+        asyncio.run(run_test())
+    
+    @patch('core.ari_events.timezone.now')
+    def test_handle_stasis_start_with_existing_session(self, mock_now):
+        """Test handling StasisStart with existing session."""
+        async def run_test():
+            # Mock current time
+            current_time = timezone.now()
+            mock_now.return_value = current_time
+            
+            # Mock channel
+            mock_channel = Mock()
+            mock_channel.id = 'test-channel-123'
+            mock_channel.name = 'PJSIP/user123-tenant_test123_inbound-00000001'
+            mock_channel.caller = {'number': '1234567890', 'name': 'Test User'}
+            
+            # Mock existing session
+            mock_session = Mock()
+            mock_session.session_id = 'existing-session-123'
+            mock_session.status = 'ringing'
+            
+            # Mock session manager
+            self.handler.session_manager.get_session_by_channel = AsyncMock(return_value=mock_session)
+            self.handler.session_manager.update_session = AsyncMock(return_value=True)
+            
+            # Mock event
+            mock_event = {}
+            
+            # Handle the event
+            await self.handler.handle_stasis_start(mock_channel, mock_event)
+            
+            # Verify stats were updated
+            self.assertEqual(self.handler.stats.stasis_start_events, 1)
+            self.assertEqual(self.handler.stats.total_events_processed, 1)
+            self.assertEqual(self.handler.stats.last_event_time, current_time)
+            
+            # Verify session update was called
+            self.handler.session_manager.update_session.assert_called_once()
+        
+        asyncio.run(run_test())
+
+
+class ARIEventHandlerGlobalTest(TestCase):
+    """Test global ARI event handler functions."""
+    
+    def test_get_ari_event_handler(self):
+        """Test global ARI event handler retrieval."""
+        async def run_test():
+            # Get handler instance
+            handler1 = await get_ari_event_handler()
+            self.assertIsInstance(handler1, ARIEventHandler)
+            
+            # Should return same instance on subsequent calls
+            handler2 = await get_ari_event_handler()
+            self.assertIs(handler1, handler2)
+            
+            # Cleanup
+            await cleanup_ari_event_handler()
+        
+        asyncio.run(run_test())
+    
+    def test_cleanup_ari_event_handler(self):
+        """Test ARI event handler cleanup."""
+        async def run_test():
+            # Get handler instance
+            handler = await get_ari_event_handler()
+            self.assertIsNotNone(handler)
+            
+            # Add custom handler to verify cleanup
+            mock_handler = Mock()
+            handler.register_custom_handler('TestEvent', mock_handler)
+            self.assertEqual(len(handler.custom_handlers), 1)
+            
+            # Cleanup
+            await cleanup_ari_event_handler()
+            
+            # Should create new instance after cleanup
+            handler2 = await get_ari_event_handler()
+            self.assertIsInstance(handler2, ARIEventHandler)
+            self.assertEqual(len(handler2.custom_handlers), 0)
+            
+            # Final cleanup
+            await cleanup_ari_event_handler()
         
         asyncio.run(run_test())
