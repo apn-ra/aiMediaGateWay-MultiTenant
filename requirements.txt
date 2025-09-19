@@ -1,0 +1,11 @@
+Django==5.2.6
+channels==4.0.0
+channels-redis==4.2.0
+python-decouple==3.8
+psycopg2-binary==2.9.9
+redis==5.0.1
+panoramisk==1.4
+python-ari==0.0.1
+asyncio-mqtt==0.16.2
+cryptography==41.0.8
+django-redis==5.4.0
