@@ -8,15 +8,13 @@ and multi-tenant event routing.
 
 import asyncio
 import logging
-from typing import Dict, Any, Optional, Callable
-from datetime import datetime
+from typing import Dict, Any, Optional
+
 from django.utils import timezone
-from django.conf import settings
 
-from .models import Tenant, CallSession
-from .session_manager import CallSessionData, get_session_manager
-from .ami_manager import get_ami_manager
-
+from core.ami.ami_manager import get_ami_manager
+from core.models import Tenant, CallSession
+from core.session.session_manager import CallSessionData, get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +27,7 @@ class AMIEventHandler:
         self.ami_manager = None
         self._tenant_cache = {}
         self._event_statistics = {
-            'newchannel': 0,
+            'new_channel': 0,
             'dial': 0,
             'hangup': 0,
             'bridge': 0,
@@ -49,7 +47,7 @@ class AMIEventHandler:
             
         # Register event handlers with the AMI manager
         await self.ami_manager.register_event_handler(
-            tenant_id, 'Newchannel', self.handle_newchannel
+            tenant_id, 'NewChannel', self.handle_new_channel
         )
         await self.ami_manager.register_event_handler(
             tenant_id, 'Dial', self.handle_dial
@@ -66,9 +64,9 @@ class AMIEventHandler:
         
         logger.info(f"Registered AMI event handlers for tenant {tenant_id}")
     
-    async def handle_newchannel(self, manager, message: Dict[str, Any]):
+    async def handle_new_channel(self, manager, message: Dict[str, Any]):
         """
-        Handle Newchannel events for early call detection.
+        Handle New channel events for early call detection.
         
         This is triggered when a new channel is created in Asterisk,
         allowing us to create sessions before the call is answered.
@@ -82,7 +80,7 @@ class AMIEventHandler:
             exten = message.get('Exten', '')
             uniqueid = message.get('Uniqueid', '')
             
-            logger.info(f"Newchannel event: {channel} from {caller_id_num}")
+            logger.info(f"New channel event: {channel} from {caller_id_num}")
             
             # Determine tenant from channel or context
             tenant_id = await self._extract_tenant_from_context(context, channel)
@@ -94,16 +92,17 @@ class AMIEventHandler:
             session_data = CallSessionData(
                 session_id=uniqueid,
                 tenant_id=tenant_id,
-                channel_id=channel,
-                caller_id=caller_id_num,
-                caller_name=caller_id_name,
-                dialed_number=exten,
-                call_direction='inbound' if self._is_inbound_channel(channel) else 'outbound',
-                status='ringing',
-                start_time=timezone.now(),
+                asterisk_unique_id=uniqueid,
+                asterisk_channel_id=channel,
+                caller_id_number=caller_id_num,
+                caller_id_name=caller_id_name,
                 context=context,
+                dialed_number=exten,
+                direction='inbound' if self._is_inbound_channel(channel) else 'outbound',
+                status='ringing',
+                call_start_time=timezone.now(),
                 metadata={
-                    'ami_event': 'Newchannel',
+                    'ami_event': 'NewChannel',
                     'uniqueid': uniqueid,
                     'original_message': message
                 }
@@ -113,7 +112,7 @@ class AMIEventHandler:
             success = await self.session_manager.create_session(session_data)
             if success:
                 logger.info(f"Created session {uniqueid} for channel {channel}")
-                self._event_statistics['newchannel'] += 1
+                self._event_statistics['new_channel'] += 1
                 
                 # Optionally create database record for persistent storage
                 await self._create_database_session(session_data)
@@ -121,7 +120,7 @@ class AMIEventHandler:
                 logger.error(f"Failed to create session for channel {channel}")
                 
         except Exception as e:
-            logger.error(f"Error handling Newchannel event: {e}")
+            logger.error(f"Error handling New channel event: {e}")
             logger.error(f"Message: {message}")
     
     async def handle_dial(self, manager, message: Dict[str, Any]):
@@ -440,13 +439,13 @@ class AMIEventHandler:
                 lambda: CallSession.objects.create(
                     tenant_id=session_data.tenant_id,
                     session_id=session_data.session_id,
-                    channel_id=session_data.channel_id,
-                    caller_id=session_data.caller_id,
-                    caller_name=session_data.caller_name or '',
+                    channel_id=session_data.asterisk_channel_id,
+                    caller_id=session_data.caller_id_number or '',
+                    caller_name=session_data.caller_id_name or '',
                     dialed_number=session_data.dialed_number or '',
-                    call_direction=session_data.call_direction,
+                    call_direction=session_data.direction,
                     status=session_data.status,
-                    start_time=session_data.start_time,
+                    start_time=session_data.call_start_time,
                     context=session_data.context or ''
                 )
             )

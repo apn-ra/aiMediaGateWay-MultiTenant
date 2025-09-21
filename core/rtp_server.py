@@ -20,13 +20,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from django.utils import timezone
 from django.conf import settings
-import threading
-import time
 import collections
 import audioop
 
-from .models import Tenant, CallSession
-from .session_manager import get_session_manager
+from .models import Tenant
+from core.session.session_manager import get_session_manager
 
 logger = logging.getLogger(__name__)
 

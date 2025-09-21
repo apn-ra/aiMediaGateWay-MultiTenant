@@ -8,7 +8,7 @@ class Tenant(models.Model):
     """
     Multi-tenant isolation model for Asterisk PBX instances
     """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
     name = models.CharField(max_length=100, unique=True)
     domain = models.CharField(max_length=255, unique=True, null=True, blank=True)
     schema_name = models.CharField(max_length=63, unique=True)
@@ -51,7 +51,6 @@ class CallSession(models.Model):
         ('outbound', 'Outbound'),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='call_sessions')
     asterisk_channel_id = models.CharField(max_length=255, unique=True)
     asterisk_unique_id = models.CharField(max_length=255, unique=True)
@@ -109,7 +108,6 @@ class AudioRecording(models.Model):
         ('alaw', 'A-law'),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     call_session = models.ForeignKey(CallSession, on_delete=models.CASCADE, related_name='audio_recordings')
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='audio_recordings')
     file_path = models.CharField(max_length=500)
@@ -198,7 +196,6 @@ class SystemConfiguration(models.Model):
         ('json', 'JSON'),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='configurations', null=True, blank=True)
     scope = models.CharField(max_length=10, choices=CONFIG_SCOPE_CHOICES, default='global')
     key = models.CharField(max_length=100)
@@ -213,10 +210,12 @@ class SystemConfiguration(models.Model):
     class Meta:
         db_table = 'system_configurations'
         ordering = ['scope', 'key']
-        unique_together = [['tenant', 'key'], ['scope', 'key']]
+        unique_together = [
+            ['tenant', 'key'],  # Each tenant + key must be unique
+            # REMOVE ['scope', 'key']
+        ]
         indexes = [
             models.Index(fields=['tenant', 'scope']),
-            models.Index(fields=['key']),
         ]
 
     def __str__(self):

@@ -30,11 +30,13 @@ class CallSessionData:
     dialed_number: Optional[str] = None
     direction: str = 'inbound'  # 'inbound' or 'outbound'
     status: str = 'detected'
+    ari_control: bool = False
     bridge_id: Optional[str] = None
+    context: Optional[str] = None
     external_media_channel_id: Optional[str] = None
     rtp_endpoint_host: Optional[str] = None
     rtp_endpoint_port: Optional[int] = None
-    session_metadata: Dict[str, Any] = None
+    metadata: Dict[str, Any] = None
     call_start_time: Optional[datetime] = None
     call_answer_time: Optional[datetime] = None
     call_end_time: Optional[datetime] = None
@@ -42,13 +44,15 @@ class CallSessionData:
     updated_at: Optional[datetime] = None
 
     def __post_init__(self):
-        if self.session_metadata is None:
-            self.session_metadata = {}
+        if self.metadata is None:
+            self.metadata = {}
         if self.created_at is None:
             self.created_at = timezone.now()
         if self.updated_at is None:
             self.updated_at = timezone.now()
 
+    def to_dict(self):
+        return asdict(self)
 
 class SessionManager:
     """
@@ -109,17 +113,17 @@ class SessionManager:
             pipe = self.redis_client.pipeline()
             
             # Store session data with expiration
-            pipe.setex(session_key, self.SESSION_EXPIRY, session_json)
+            await pipe.setex(session_key, self.SESSION_EXPIRY, session_json)
             
             # Add session to tenant index
             tenant_sessions_key = self._get_tenant_session_key(session_data.tenant_id)
-            pipe.sadd(tenant_sessions_key, session_id)
-            pipe.expire(tenant_sessions_key, self.SESSION_EXPIRY)
+            await pipe.sadd(tenant_sessions_key, session_id)
+            await pipe.expire(tenant_sessions_key, self.SESSION_EXPIRY)
             
             # Create channel to session mapping
             if session_data.asterisk_channel_id:
                 channel_key = self._get_channel_session_key(session_data.asterisk_channel_id)
-                pipe.setex(channel_key, self.SESSION_EXPIRY, session_id)
+                await pipe.setex(channel_key, self.SESSION_EXPIRY, session_id)
             
             # Execute pipeline
             pipe.execute()
@@ -187,7 +191,7 @@ class SessionManager:
             # Store updated session
             session_key = self._get_session_key(session_id)
             session_json = json.dumps(asdict(current_session), default=str)
-            self.redis_client.setex(session_key, self.SESSION_EXPIRY, session_json)
+            await self.redis_client.setex(session_key, self.SESSION_EXPIRY, session_json)
 
             logger.debug(f"Updated session {session_id}")
             return True
@@ -229,16 +233,16 @@ class SessionManager:
 
             # Remove session data
             session_key = self._get_session_key(session_id)
-            pipe.delete(session_key)
+            await pipe.delete(session_key)
 
             # Remove from tenant index
             tenant_sessions_key = self._get_tenant_session_key(session.tenant_id)
-            pipe.srem(tenant_sessions_key, session_id)
+            await pipe.srem(tenant_sessions_key, session_id)
 
             # Remove channel mapping
             if session.asterisk_channel_id:
                 channel_key = self._get_channel_session_key(session.asterisk_channel_id)
-                pipe.delete(channel_key)
+                await pipe.delete(channel_key)
 
             # Execute cleanup
             pipe.execute()

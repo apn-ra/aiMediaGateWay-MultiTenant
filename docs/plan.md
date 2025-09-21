@@ -84,7 +84,7 @@ Session Events → Django Channels → WebSocket → Dashboard Updates
 
 The session manager operates on a pre-creation principle:
 
-1. **Early Detection**: AMI Newchannel events detect calls before answer
+1. **Early Detection**: AMI New Channel events detect calls before answer
 2. **Session Pre-Creation**: Sessions created with caller metadata (ID, dialed number)
 3. **RTP Attachment**: When ExternalMedia starts, RTP attaches to existing session
 4. **Zero Loss**: No audio packets lost during session establishment

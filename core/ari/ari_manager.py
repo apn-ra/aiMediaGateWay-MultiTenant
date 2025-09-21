@@ -13,21 +13,17 @@ Following the same architectural patterns as ami_manager.py for consistency.
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any, Callable
+import ari
+from typing import Dict, Optional, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from django.conf import settings
 from django.utils import timezone
-try:
-    import ari
-except ImportError:
-    # Handle missing python-ari dependency gracefully for testing
-    ari = None
-    print("Warning: python-ari not available - ARI functionality will be limited")
 
-from .models import Tenant, SystemConfiguration
-from .session_manager import SessionManager, get_session_manager
+
+from core.models import Tenant, SystemConfiguration
+from core.session.session_manager import get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +186,10 @@ class ARIConnection:
                 return True
 
             # Check if ARI module is available
-            if ari is None:
-                logger.error(f"ARI module not available - cannot connect for tenant {self.tenant_id}")
-                return False
+            # if ari is None:
+            #     print(ari)
+            #     logger.error(f"ARI module not available - cannot connect for tenant {self.tenant_id}")
+            #     return False
 
             retry_count = 0
             while retry_count < self.config.max_retries:

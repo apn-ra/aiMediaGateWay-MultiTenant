@@ -3,17 +3,15 @@ Session Lifecycle Management for aiMediaGateway
 Handles session creation from AMI events, state tracking, and event notifications.
 """
 
-import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from django.utils import timezone
 from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 
-from .session_manager import SessionManager, CallSessionData, get_session_manager
-from .models import CallSession, Tenant
+from core.session.session_manager import SessionManager, CallSessionData, get_session_manager
+from core.models import CallSession, Tenant
 
 
 logger = logging.getLogger(__name__)

@@ -11,11 +11,10 @@ import logging
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from django.conf import settings
 from django.utils import timezone
 import panoramisk
-from .models import Tenant, SystemConfiguration
-from .session_manager import SessionManager, get_session_manager
+from core.models import Tenant, SystemConfiguration
+from core.session.session_manager import SessionManager, get_session_manager
 
 
 logger = logging.getLogger(__name__)

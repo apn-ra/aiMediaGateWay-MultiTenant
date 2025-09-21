@@ -15,23 +15,17 @@ Features:
 - Connection management and cleanup
 """
 
-import asyncio
 import logging
 import json
-from typing import Dict, List, Optional, Any, Set
-from datetime import datetime
 from channels.generic.websocket import AsyncWebsocketConsumer
-from channels.db import database_sync_to_async
 from django.utils import timezone
 from django.contrib.auth.models import AnonymousUser
 
 # Import our components
-from .session_manager import get_session_manager
-from .audio_streaming import get_streaming_manager, StreamingConfig, StreamingProtocol, StreamQuality, StreamingFormat
-from .audio_recording import get_recording_manager
-from .audio_quality import get_quality_manager
-from .audio_transcription import get_transcription_manager
-from .models import CallSession, Tenant
+from core.session.session_manager import get_session_manager
+from core.audio.audio_streaming import get_streaming_manager, StreamingProtocol, StreamQuality, StreamingFormat
+from core.audio.audio_recording import get_recording_manager
+from core.audio.audio_quality import get_quality_manager
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +352,7 @@ class LiveAudioStreamConsumer(AsyncWebsocketConsumer):
     async def _setup_audio_streaming(self):
         """Setup audio streaming connection"""
         try:
-            from .audio_streaming import StreamConnection, StreamingConfig
+            from core.audio.audio_streaming import StreamConnection, StreamingConfig
             import time
             
             config = StreamingConfig(

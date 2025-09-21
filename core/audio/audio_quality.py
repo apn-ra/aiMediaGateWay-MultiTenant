@@ -26,8 +26,8 @@ from enum import Enum
 from collections import deque, defaultdict
 
 from django.utils import timezone
-from .rtp_server import AudioFrame
-from .models import CallSession
+from core.rtp_server import AudioFrame
+from core.models import CallSession
 
 logger = logging.getLogger(__name__)
 

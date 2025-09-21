@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.conf import settings
 
-from .models import Tenant, SystemConfiguration
+from core.models import Tenant, SystemConfiguration
 
 
 logger = logging.getLogger(__name__)

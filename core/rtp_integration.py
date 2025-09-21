@@ -15,12 +15,10 @@ import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
-from datetime import datetime
 from django.utils import timezone
 
-from .session_manager import get_session_manager, CallSessionData
-from .rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
-from .models import CallSession, Tenant
+from core.session.session_manager import get_session_manager, CallSessionData
+from core.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +168,7 @@ class RTPSessionIntegrator:
             logger.error(f"Error integrating session {session_id} with RTP: {e}")
             return False
     
-    async def deintegrate_session(self, session_id: str) -> bool:
+    async def de_integrate_session(self, session_id: str) -> bool:
         """Remove session integration with RTP server"""
         try:
             if session_id not in self.active_integrations:
@@ -190,14 +188,14 @@ class RTPSessionIntegrator:
             # Clean up integration data
             del self.active_integrations[session_id]
             
-            # Fire session deintegration event
+            # Fire session de-integration event
             await self._fire_session_event('session_ended', session_id, integration_data)
             
-            logger.info(f"Successfully deintegrated session {session_id} from RTP server")
+            logger.info(f"Successfully de-integrated session {session_id} from RTP server")
             return True
             
         except Exception as e:
-            logger.error(f"Error deintegrating session {session_id} from RTP: {e}")
+            logger.error(f"Error de-integrating session {session_id} from RTP: {e}")
             return False
     
     async def _create_rtp_endpoint(self, session: CallSessionData, routing_decision=None) -> Optional[RTPEndpoint]:
@@ -319,7 +317,7 @@ class RTPSessionIntegrator:
                 # Clean up stale sessions
                 for session_id in stale_sessions:
                     logger.info(f"Cleaning up stale RTP integration for session {session_id}")
-                    await self.deintegrate_session(session_id)
+                    await self.de_integrate_session(session_id)
                 
                 if stale_sessions:
                     logger.info(f"Cleaned up {len(stale_sessions)} stale RTP integrations")

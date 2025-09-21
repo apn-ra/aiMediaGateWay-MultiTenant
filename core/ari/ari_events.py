@@ -9,16 +9,14 @@ Following the same architectural patterns as ami_events.py for consistency.
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from django.conf import settings
 from django.utils import timezone
 
-from .models import Tenant, CallSession
-from .session_manager import get_session_manager, CallSessionData
-from .ari_manager import get_ari_manager
-from .call_routing import get_routing_engine, RoutingDecision
+from core.session.session_manager import get_session_manager, CallSessionData
+from core.ari.ari_manager import get_ari_manager
+from core.call_routing import get_routing_engine, RoutingDecision
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -108,7 +106,7 @@ class ARIEventHandler:
                 # Update existing session status
                 session.status = 'in_application'
                 session.ari_control = True
-                await self.session_manager.update_session(session.session_id, session)
+                await self.session_manager.update_session(session.session_id, session.to_dict())
                 logger.info(f"Updated existing session {session.session_id} for channel {channel_id}")
             
             # Get routing decision based on tenant configuration
@@ -327,7 +325,7 @@ class ARIEventHandler:
             if session and session.metadata:
                 session.metadata.pop('bridge_id', None)
                 session.metadata.pop('bridge_type', None)
-                await self.session_manager.update_session(session.session_id, session)
+                await self.session_manager.update_session(session.session_id, session.to_dict())
                 logger.debug(f"Removed bridge information from session {session.session_id}")
             
             # Call custom handlers
@@ -505,7 +503,7 @@ class ARIEventHandler:
             
             # Update session with routing metadata
             if session and routing_decision.metadata:
-                session.session_metadata.update(routing_decision.metadata)
+                session.metadata.update(routing_decision.metadata)
                 await self.session_manager.update_session(session.session_id, session)
             
             if action == 'answer':
@@ -543,7 +541,7 @@ class ARIEventHandler:
         """Clean up session after a delay"""
         try:
             await asyncio.sleep(delay_seconds)
-            await self.session_manager.end_session(session_id)
+            await self.session_manager.cleanup_session(session_id)
             logger.debug(f"Cleaned up session {session_id} after {delay_seconds} seconds")
         except Exception as e:
             logger.error(f"Error in delayed session cleanup for {session_id}: {e}")
