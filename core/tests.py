@@ -7,6 +7,7 @@ import unittest
 from datetime import timedelta
 from django.utils import timezone
 
+from ari.config import ARIConfig
 from core.models import Tenant, SystemConfiguration
 from core.ami.ami_manager import (
     AMIConnectionConfig, 
@@ -22,7 +23,6 @@ from core.ami.ami_events import (
     cleanup_event_handler
 )
 from core.ari.ari_manager import (
-    ARIConnectionConfig,
     ARIConnectionStats,
     ARIConnection,
     ARIManager,
@@ -598,64 +598,34 @@ class AMIEventHandlerGlobalTest(TestCase):
 class ARIConnectionConfigTest(unittest.IsolatedAsyncioTestCase):
     """Test ARI connection configuration dataclass."""
 
-    def setUp(self):
-        self.tenant = Tenant.objects.create(
-            name="ARI Test Tenant",
-            asterisk_host=config('ASTERISK_HOST', cast=str),
-            asterisk_ari_port=config('ASTERISK_ARI_PORT', cast=int),
-            asterisk_ari_username=config('ASTERISK_ARI_USERNAME', cast=str),
-            asterisk_ari_password=config('ASTERISK_ARI_PASSWORD', cast=str),
-            domain="aritest",
-            is_active=True
-        )
-
-    def tearDown(self):
-        """Tear down test environment."""
-        Tenant.objects.all().delete()
-
     def test_default_values(self):
         """Test default configuration values."""
-        ari_config = ARIConnectionConfig(
-            host='ari.example.com',
-            port=8089,
-            username='testuser',
-            password='testpass',
-            app_name='testapp',
-            timeout=45,
-            max_retries=5,
-            retry_delay=10
-        )
+        ari_config = ARIConfig()
 
-        self.assertEqual(ari_config.host, 'ari.example.com')
-        self.assertEqual(ari_config.port, 8089)
-        self.assertEqual(ari_config.username, 'testuser')
-        self.assertEqual(ari_config.password, 'testpass')
-        self.assertEqual(ari_config.app_name, 'testapp')
+        self.assertEqual(ari_config.host, config('ASTERISK_HOST', cast=str))
+        self.assertEqual(ari_config.port, config('ASTERISK_ARI_PORT', cast=int))
+        self.assertEqual(ari_config.username, config('ASTERISK_ARI_USERNAME', cast=str))
+        self.assertEqual(ari_config.password, config('ASTERISK_ARI_PASSWORD', cast=str))
+        self.assertEqual(ari_config.app_name, config('ASTERISK_ARI_APP_NAME', cast=str))
         self.assertEqual(ari_config.timeout, 30)
-        self.assertEqual(ari_config.max_retries, 3)
-        self.assertEqual(ari_config.retry_delay, 10)
-    
+
     def test_custom_values(self):
         """Test custom configuration values."""
-        ari_config = ARIConnectionConfig(
+
+        ari_config = ARIConfig(
             host='ari.example.com',
             port=8089,
-            username='testuser',
-            password='testpass',
+            username='ari',
+            password='testapp',
             app_name='testapp',
-            timeout=45,
-            max_retries=5,
-            retry_delay=10
+            retry_attempts=5,
+            retry_backoff=10,
         )
 
         self.assertEqual(ari_config.host, 'ari.example.com')
         self.assertEqual(ari_config.port, 8089)
-        self.assertEqual(ari_config.username, 'testuser')
-        self.assertEqual(ari_config.password, 'testpass')
-        self.assertEqual(ari_config.app_name, 'testapp')
-        self.assertEqual(ari_config.timeout, 45)
-        self.assertEqual(ari_config.max_retries, 5)
-        self.assertEqual(ari_config.retry_delay, 10)
+        self.assertEqual(ari_config.retry_attempts, 5)
+        self.assertEqual(ari_config.retry_backoff, 10)
 
 
 class ARIConnectionStatsTest(TestCase):
@@ -701,18 +671,16 @@ class ARIConnectionTest(TransactionTestCase):
             asterisk_ari_port=config('ASTERISK_ARI_PORT', cast=int),
             asterisk_ari_username=config('ASTERISK_ARI_USERNAME', cast=str),
             asterisk_ari_password=config('ASTERISK_ARI_PASSWORD', cast=str),
+            asterisk_ari_app_name=config('ASTERISK_ARI_APP_NAME', cast=str),
             domain="aritest",
             is_active=True
         )
-        self.config = ARIConnectionConfig(
+        self.config = ARIConfig(
             host=self.tenant.asterisk_host,
             port=self.tenant.asterisk_ari_port,
             username=self.tenant.asterisk_ari_username,
             password=self.tenant.asterisk_ari_password,
-            app_name='testapp',
-            timeout=10,
-            max_retries=2,
-            retry_delay=1
+            app_name=self.tenant.asterisk_ari_app_name
         )
 
     def tearDown(self):
@@ -724,7 +692,7 @@ class ARIConnectionTest(TransactionTestCase):
         connection = ARIConnection(str(self.tenant.id), self.config)
         self.assertEqual(connection.tenant_id, str(self.tenant.id))
         self.assertEqual(connection.config, self.config)
-        self.assertIsNone(connection.client)
+        self.assertIsNotNone(connection.client)
         self.assertIsInstance(connection.stats, ARIConnectionStats)
         self.assertFalse(connection.stats.connected)
         self.assertEqual(len(connection.event_handlers), 0)
@@ -734,9 +702,6 @@ class ARIConnectionTest(TransactionTestCase):
         async def run_test():
             connection = ARIConnection(str(self.tenant.id), self.config)
 
-            connection._setup_event_handlers = AsyncMock()
-            connection._start_health_check_task = Mock()
-            
             result = await connection.connect()
             
             self.assertTrue(result)

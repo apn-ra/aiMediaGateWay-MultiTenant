@@ -13,7 +13,7 @@ Following the same architectural patterns as ami_manager.py for consistency.
 
 import asyncio
 import logging
-import ari
+from ari import ARIClient, ARIConfig
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -153,10 +153,10 @@ class ARIConnection:
     Handles connection management, operations, and health monitoring
     """
     
-    def __init__(self, tenant_id: str, config: ARIConnectionConfig):
+    def __init__(self, tenant_id: str, config: ARIConfig):
         self.tenant_id = tenant_id
         self.config = config
-        self.client = None
+        self.client = ARIClient(self.config)
         self.stats = ARIConnectionStats()
         self.event_handlers: Dict[str, Callable] = {}
         self.reconnect_task = None
@@ -185,30 +185,13 @@ class ARIConnection:
                 logger.debug(f"ARI already connected for tenant {self.tenant_id}")
                 return True
 
-            # Check if ARI module is available
-            # if ari is None:
-            #     print(ari)
-            #     logger.error(f"ARI module not available - cannot connect for tenant {self.tenant_id}")
-            #     return False
-
             retry_count = 0
-            while retry_count < self.config.max_retries:
+            while retry_count < self.config.retry_attempts:
                 try:
                     logger.info(f"Attempting ARI connection for tenant {self.tenant_id} (attempt {retry_count + 1})")
-                    
-                    # Create ARI client
-                    self.client = ari.connect(
-                        base_url=f"http://{self.config.host}:{self.config.port}",
-                        username=self.config.username,
-                        password=self.config.password,
-                        timeout=self.config.timeout
-                    )
-                    
-                    # Test connection with a simple operation
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: self.client.asterisk.info()
-                    )
-                    
+
+                    await self.client.connect()
+
                     # Update connection stats
                     self.stats.connected = True
                     self.stats.connection_time = timezone.now()
@@ -226,7 +209,7 @@ class ARIConnection:
                     self.stats.failed_operations += 1
                     logger.error(f"ARI connection failed for tenant {self.tenant_id}: {e}")
                     
-                    if retry_count < self.config.max_retries:
+                    if retry_count < self.config.retry_attempts:
                         logger.info(f"Retrying in {self.config.retry_delay} seconds...")
                         await asyncio.sleep(self.config.retry_delay)
                     else:
@@ -417,34 +400,30 @@ class ARIConnection:
     async def answer_call(self, channel_id: str) -> bool:
         """Answer an incoming call"""
         try:
-            channel = self.client.channels.get(channelId=channel_id)
-            await self.execute_operation(channel.answer)
+            await self.execute_operation(self.client.answer_channel, channel_id=channel_id)
             logger.info(f"Call answered: {channel_id} for tenant {self.tenant_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to answer call {channel_id} for tenant {self.tenant_id}: {e}")
             return False
 
-    async def hangup_call(self, channel_id: str) -> bool:
+    async def hangup_call(self, channel_id: str, reason: Optional[str] = None) -> bool:
         """Hangup a call"""
         try:
-            channel = self.client.channels.get(channelId=channel_id)
-            await self.execute_operation(channel.hangup)
+            await self.execute_operation(self.client.hangup_channel, channel_id=channel_id, reason=reason)
             logger.info(f"Call hung up: {channel_id} for tenant {self.tenant_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to hangup call {channel_id} for tenant {self.tenant_id}: {e}")
             return False
 
-    async def create_external_media_channel(self, external_host: str, external_port: int, 
-                                          format: str = "ulaw") -> Optional[str]:
+    async def create_external_media_channel(self, external_host: str, format: str = "slin16") -> Optional[str]:
         """Create an ExternalMedia channel for RTP streaming"""
         try:
             channel = await self.execute_operation(
-                self.client.channels.externalMedia,
+                self.client.create_external_media,
                 external_host=external_host,
-                external_port=external_port,
-                format=format,
+                codec=format,
                 app=self.config.app_name
             )
             
@@ -461,8 +440,8 @@ class ARIConnection:
         """Create a bridge for connecting channels"""
         try:
             bridge = await self.execute_operation(
-                self.client.bridges.create,
-                type=bridge_type
+                self.client.create_bridge,
+                bridge_type=bridge_type
             )
             
             if bridge:
@@ -491,7 +470,7 @@ class ARIConnection:
             if not recording_name:
                 recording_name = f"recording_{channel_id}_{int(timezone.now().timestamp())}"
             
-            channel = self.client.channels.get(channelId=channel_id)
+            channel = await self.client.get_channel(channelId=channel_id)
             recording = await self.execute_operation(
                 channel.record,
                 name=recording_name,
@@ -597,9 +576,9 @@ class ARIConnection:
             
         try:
             # Register for application events
-            self.client.on_channel_event('StasisStart', self._handle_stasis_start)
-            self.client.on_channel_event('StasisEnd', self._handle_stasis_end)
-            self.client.on_channel_event('ChannelStateChange', self._handle_channel_state_change)
+            self.client.on_event('StasisStart', self._handle_stasis_start)
+            self.client.on_event('StasisEnd', self._handle_stasis_end)
+            self.client.on_event('ChannelStateChange', self._handle_channel_state_change)
             
             logger.debug(f"ARI event handlers setup for tenant {self.tenant_id}")
         except Exception as e:
@@ -665,7 +644,7 @@ class ARIConnection:
             
         try:
             # Simple health check operation
-            await self.execute_operation(self.client.asterisk.info)
+            await self.execute_operation(self.client.test_connection)
         except Exception as e:
             logger.warning(f"ARI health check failed for tenant {self.tenant_id}: {e}")
             self.stats.connected = False
@@ -788,7 +767,7 @@ class ARIManager:
                 health_status[tenant_id] = False
         return health_status
 
-    async def _get_tenant_ari_config(self, tenant_id: str) -> Optional[ARIConnectionConfig]:
+    async def _get_tenant_ari_config(self, tenant_id: str) -> Optional[ARIConfig]:
         """Get ARI configuration for a specific tenant"""
         try:
             # Get tenant
@@ -806,7 +785,7 @@ class ARIManager:
             ari_max_retries = await self._get_config_value(tenant_id, 'ari_max_retries', 3)
             ari_retry_delay = await self._get_config_value(tenant_id, 'ari_retry_delay', 5)
             
-            return ARIConnectionConfig(
+            return ARIConfig(
                 host=ari_host,
                 port=int(ari_port),
                 username=ari_username,
@@ -821,12 +800,13 @@ class ARIManager:
             logger.error(f"Error getting ARI config for tenant {tenant_id}: {e}")
             return None
 
-    async def _get_config_value(self, tenant_id: str, config_key: str, default_value):
+    @staticmethod
+    async def _get_config_value(tenant_id: str, config_key: str, default_value):
         """Get configuration value for a tenant"""
         try:
             config = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: SystemConfiguration.objects.get(
-                    tenant_id=tenant_id, 
+                    tenant_id=tenant_id,
                     config_key=config_key
                 )
             )
