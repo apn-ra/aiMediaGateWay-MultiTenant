@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from core.session.session_manager import get_session_manager, CallSessionData
 from core.ari.ari_manager import get_ari_manager
-from core.call_routing import get_routing_engine, RoutingDecision
+from core.junie_codes.call_routing import get_routing_engine, RoutingDecision
 
 # Configure logging
 logger = logging.getLogger(__name__)

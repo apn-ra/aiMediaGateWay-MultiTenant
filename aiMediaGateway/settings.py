@@ -37,8 +37,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'channels',
     'django_extensions',
+    'channels',
     'rtp_collector',
     'core',
     'ari'
@@ -175,6 +175,11 @@ LOGGING = {
         },
     },
     'loggers': {
+        'core': {
+                'handlers': ['console', 'file'],
+                'level': 'DEBUG',
+                'propagate': False,
+            },
         'django': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
@@ -228,3 +233,35 @@ CACHES = {
         'TIMEOUT': 300,
     }
 }
+
+# NVIDIA RIVA ASR Configuration
+# RIVA Server Settings
+RIVA_ASR_URI = config('RIVA_ASR_URI', default='localhost:50051')
+RIVA_USE_SSL = config('RIVA_USE_SSL', default=False, cast=bool)
+RIVA_SSL_CERT = config('RIVA_SSL_CERT', default=None)
+RIVA_SSL_KEY = config('RIVA_SSL_KEY', default=None)
+RIVA_SSL_ROOT_CERTS = config('RIVA_SSL_ROOT_CERTS', default=None)
+
+# RIVA Authentication (if needed for enterprise deployments)
+RIVA_AUTH_TOKEN = config('RIVA_AUTH_TOKEN', default=None)
+RIVA_AUTH_METADATA = config('RIVA_AUTH_METADATA', default=None)
+
+# RIVA ASR Default Settings
+RIVA_DEFAULT_LANGUAGE = config('RIVA_DEFAULT_LANGUAGE', default='en-US')
+RIVA_DEFAULT_SAMPLE_RATE = config('RIVA_DEFAULT_SAMPLE_RATE', default=16000, cast=int)
+RIVA_MAX_ALTERNATIVES = config('RIVA_MAX_ALTERNATIVES', default=3, cast=int)
+RIVA_ENABLE_PROFANITY_FILTER = config('RIVA_ENABLE_PROFANITY_FILTER', default=True, cast=bool)
+RIVA_ENABLE_SPEAKER_DIARIZATION = config('RIVA_ENABLE_SPEAKER_DIARIZATION', default=True, cast=bool)
+RIVA_ENABLE_WORD_TIMESTAMPS = config('RIVA_ENABLE_WORD_TIMESTAMPS', default=True, cast=bool)
+RIVA_ENABLE_AUTOMATIC_PUNCTUATION = config('RIVA_ENABLE_AUTOMATIC_PUNCTUATION', default=True, cast=bool)
+
+# RIVA Performance Settings
+RIVA_CONNECTION_TIMEOUT = config('RIVA_CONNECTION_TIMEOUT', default=30.0, cast=float)
+RIVA_REQUEST_TIMEOUT = config('RIVA_REQUEST_TIMEOUT', default=300.0, cast=float)
+RIVA_STREAMING_CHUNK_SIZE = config('RIVA_STREAMING_CHUNK_SIZE', default=1024, cast=int)
+RIVA_MAX_CONCURRENT_REQUESTS = config('RIVA_MAX_CONCURRENT_REQUESTS', default=10, cast=int)
+
+# Audio Transcription Settings
+TRANSCRIPTION_CACHE_TTL = config('TRANSCRIPTION_CACHE_TTL', default=3600, cast=int)  # 1 hour
+TRANSCRIPTION_MAX_AUDIO_SIZE = config('TRANSCRIPTION_MAX_AUDIO_SIZE', default=50*1024*1024, cast=int)  # 50MB
+TRANSCRIPTION_SUPPORTED_FORMATS = ['wav', 'mp3', 'flac', 'ogg', 'aac']

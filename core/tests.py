@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from ari.config import ARIConfig
 from core.models import Tenant, SystemConfiguration
-from core.ami.ami_manager import (
+from core.junie_codes.ami.ami_manager import (
     AMIConnectionConfig, 
     ConnectionStats, 
     AMIConnection, 
@@ -17,7 +17,7 @@ from core.ami.ami_manager import (
     get_ami_manager,
     cleanup_ami_manager
 )
-from core.ami.ami_events import (
+from core.junie_codes.ami.ami_events import (
     AMIEventHandler,
     get_event_handler,
     cleanup_event_handler

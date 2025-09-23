@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 
 from django.utils import timezone
 
-from core.ami.ami_manager import get_ami_manager
+from core.junie_codes.ami.ami_manager import get_ami_manager
 from core.models import Tenant, CallSession
 from core.session.session_manager import CallSessionData, get_session_manager
 
@@ -63,7 +63,7 @@ class AMIEventHandler:
         )
         
         logger.info(f"Registered AMI event handlers for tenant {tenant_id}")
-    
+
     async def handle_new_channel(self, manager, message: Dict[str, Any]):
         """
         Handle New channel events for early call detection.

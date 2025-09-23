@@ -1,3 +1,6 @@
 # Author: RA
-# Purpose: 
+# Purpose:
 # Created: 23/09/2025
+
+
+clients = {}

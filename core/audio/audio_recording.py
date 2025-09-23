@@ -33,7 +33,7 @@ from django.conf import settings
 
 # Import our components
 from core.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
-from core.rtp_server import AudioFrame
+from core.junie_codes.rtp_server import AudioFrame
 from core.models import CallSession, Tenant, AudioRecording
 
 logger = logging.getLogger(__name__)

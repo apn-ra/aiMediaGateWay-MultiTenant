@@ -14,6 +14,16 @@ Following the same architectural patterns as ami_manager.py for consistency.
 import asyncio
 import logging
 from ari import ARIClient, ARIConfig
+from ari.circuit_breaker import CircuitBreaker
+from ari.exceptions import (
+    ARIError,
+    ConnectionError as ARIConnectionError,
+    AuthenticationError,
+    HTTPError,
+    ResourceNotFoundError,
+    ValidationError,
+    WebSocketError
+)
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,78 +51,8 @@ class ARIErrorType(Enum):
     UNKNOWN_ERROR = "unknown_error"               # Unrecognized error
 
 
-class ARICircuitBreaker:
-    """Circuit breaker pattern for ARI operations to prevent cascade failures"""
-    
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.is_open = False
-        
-    def call(self, func, *args, **kwargs):
-        """Execute function with circuit breaker protection"""
-        if self.is_open:
-            if self._should_attempt_reset():
-                return self._attempt_reset(func, *args, **kwargs)
-            else:
-                raise Exception("Circuit breaker is open - operation blocked")
-        
-        try:
-            result = func(*args, **kwargs)
-            self._on_success()
-            return result
-        except Exception as e:
-            self._on_failure()
-            raise
-    
-    def _should_attempt_reset(self) -> bool:
-        """Check if enough time has passed to attempt reset"""
-        if not self.last_failure_time:
-            return True
-        return (timezone.now() - self.last_failure_time).seconds >= self.recovery_timeout
-    
-    def _attempt_reset(self, func, *args, **kwargs):
-        """Attempt to reset circuit breaker with test call"""
-        try:
-            result = func(*args, **kwargs)
-            self._on_success()
-            logger.info("Circuit breaker reset successfully")
-            return result
-        except Exception as e:
-            self._on_failure()
-            raise
-    
-    def _on_success(self):
-        """Handle successful operation"""
-        self.failure_count = 0
-        self.is_open = False
-        self.last_failure_time = None
-    
-    def _on_failure(self):
-        """Handle failed operation"""
-        self.failure_count += 1
-        self.last_failure_time = timezone.now()
-        if self.failure_count >= self.failure_threshold:
-            self.is_open = True
-            logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
 
 
-class ARIRetryConfig:
-    """Configuration for retry logic with exponential backoff"""
-    
-    def __init__(self, max_attempts: int = 3, base_delay: float = 1.0, 
-                 max_delay: float = 60.0, backoff_factor: float = 2.0):
-        self.max_attempts = max_attempts
-        self.base_delay = base_delay
-        self.max_delay = max_delay
-        self.backoff_factor = backoff_factor
-    
-    def get_delay(self, attempt: int) -> float:
-        """Calculate delay for given attempt number"""
-        delay = self.base_delay * (self.backoff_factor ** attempt)
-        return min(delay, self.max_delay)
 
 @dataclass
 class ARIConnectionConfig:
@@ -164,16 +104,12 @@ class ARIConnection:
         self.session_manager = get_session_manager()
         self._lock = asyncio.Lock()
         
-        # Enhanced error handling and recovery
-        self.circuit_breaker = ARICircuitBreaker(
-            failure_threshold=getattr(settings, 'ARI_CIRCUIT_BREAKER_THRESHOLD', 5),
-            recovery_timeout=getattr(settings, 'ARI_CIRCUIT_BREAKER_TIMEOUT', 60)
-        )
-        self.retry_config = ARIRetryConfig(
-            max_attempts=getattr(settings, 'ARI_MAX_RETRY_ATTEMPTS', 3),
-            base_delay=getattr(settings, 'ARI_RETRY_BASE_DELAY', 1.0),
-            max_delay=getattr(settings, 'ARI_RETRY_MAX_DELAY', 60.0),
-            backoff_factor=getattr(settings, 'ARI_RETRY_BACKOFF_FACTOR', 2.0)
+        # Enhanced error handling and recovery using ari app circuit breaker
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=self.config.circuit_breaker_failure_threshold,
+            recovery_timeout=self.config.circuit_breaker_recovery_timeout,
+            expected_exception=ARIConnectionError,
+            name=f"ARI-{tenant_id}"
         )
         
         logger.info(f"ARI connection initialized for tenant {tenant_id}")
@@ -200,7 +136,10 @@ class ARIConnection:
                     # Setup event handlers and start health monitoring
                     await self._setup_event_handlers()
                     self._start_health_check_task()
-                    
+
+                    # Start WebSocket connection
+                    # await self.client.connect_websocket()
+
                     logger.info(f"ARI connected successfully for tenant {self.tenant_id}")
                     return True
                     
@@ -246,39 +185,38 @@ class ARIConnection:
                 logger.error(f"Error disconnecting ARI for tenant {self.tenant_id}: {e}")
 
     def _categorize_error(self, error: Exception) -> ARIErrorType:
-        """Categorize error for appropriate recovery strategy"""
-        error_str = str(error).lower()
-        error_type = type(error).__name__.lower()
-        
-        # Connection-related errors
-        if 'connection' in error_str or 'connect' in error_str:
+        """Categorize error for appropriate recovery strategy using ari.exceptions"""
+        # Use standardized exception types from ari app
+        if isinstance(error, ARIConnectionError):
             return ARIErrorType.CONNECTION_ERROR
-        if 'timeout' in error_str or 'timed out' in error_str:
-            return ARIErrorType.TIMEOUT_ERROR
-        if 'network' in error_str or 'unreachable' in error_str:
-            return ARIErrorType.CONNECTION_ERROR
-            
-        # Authentication errors
-        if 'unauthorized' in error_str or 'auth' in error_str:
+        elif isinstance(error, AuthenticationError):
             return ARIErrorType.AUTHENTICATION_ERROR
-        if 'permission' in error_str or 'forbidden' in error_str:
-            return ARIErrorType.PERMISSION_DENIED
-            
-        # Resource errors
-        if 'not found' in error_str or '404' in error_str:
+        elif isinstance(error, ResourceNotFoundError):
             return ARIErrorType.RESOURCE_NOT_FOUND
-        if 'invalid state' in error_str or 'bad state' in error_str:
+        elif isinstance(error, ValidationError):
             return ARIErrorType.INVALID_STATE
-            
-        # Rate limiting
-        if 'rate limit' in error_str or 'too many' in error_str:
-            return ARIErrorType.RATE_LIMITED
-            
-        # Server errors
-        if 'server error' in error_str or '5' in error_str[:2]:
-            return ARIErrorType.SERVER_ERROR
-            
-        return ARIErrorType.UNKNOWN_ERROR
+        elif isinstance(error, WebSocketError):
+            return ARIErrorType.CONNECTION_ERROR
+        elif isinstance(error, HTTPError):
+            if error.status_code == 403:
+                return ARIErrorType.PERMISSION_DENIED
+            elif error.status_code == 429:
+                return ARIErrorType.RATE_LIMITED
+            elif 500 <= error.status_code < 600:
+                return ARIErrorType.SERVER_ERROR
+            else:
+                return ARIErrorType.UNKNOWN_ERROR
+        elif isinstance(error, asyncio.TimeoutError):
+            return ARIErrorType.TIMEOUT_ERROR
+        else:
+            # Fallback to string-based categorization for non-ARI exceptions
+            error_str = str(error).lower()
+            if 'connection' in error_str or 'network' in error_str:
+                return ARIErrorType.CONNECTION_ERROR
+            elif 'timeout' in error_str or 'timed out' in error_str:
+                return ARIErrorType.TIMEOUT_ERROR
+            else:
+                return ARIErrorType.UNKNOWN_ERROR
 
     def _update_error_stats(self, error_type: ARIErrorType):
         """Update error statistics based on error type"""
@@ -296,7 +234,7 @@ class ARIConnection:
 
     def _should_retry(self, error_type: ARIErrorType, attempt: int) -> bool:
         """Determine if operation should be retried based on error type and attempt count"""
-        if attempt >= self.retry_config.max_attempts:
+        if attempt >= self.config.retry_attempts:
             return False
             
         # Don't retry certain error types
@@ -327,20 +265,12 @@ class ARIConnection:
         # Extract timeout from kwargs or use default
         operation_timeout = kwargs.pop('timeout', getattr(settings, 'ARI_OPERATION_TIMEOUT', 30.0))
         
-        for attempt in range(self.retry_config.max_attempts):
+        for attempt in range(self.config.retry_attempts):
             try:
-                # Check circuit breaker before attempting operation
-                if self.circuit_breaker.is_open and not self.circuit_breaker._should_attempt_reset():
-                    logger.warning(f"Circuit breaker is open for tenant {self.tenant_id} - operation blocked")
-                    self.stats.circuit_breaker_trips += 1
-                    return None
-                
                 # Execute operation with timeout and circuit breaker protection
+                # The ari app circuit breaker is async-compatible
                 result = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        lambda: self.circuit_breaker.call(operation_func, *args, **kwargs)
-                    ),
+                    self.circuit_breaker.call(operation_func, *args, **kwargs),
                     timeout=operation_timeout
                 )
                 
@@ -360,7 +290,7 @@ class ARIConnection:
                 self._update_error_stats(error_type)
                 self.stats.failed_operations += 1
                 
-                logger.warning(f"ARI operation timed out (attempt {attempt + 1}/{self.retry_config.max_attempts}) for tenant {self.tenant_id}")
+                logger.warning(f"ARI operation timed out (attempt {attempt + 1}/{self.config.retry_attempts}) for tenant {self.tenant_id}")
                 
                 if not self._should_retry(error_type, attempt):
                     logger.error(f"ARI operation failed after timeout - no more retries for tenant {self.tenant_id}")
@@ -373,7 +303,7 @@ class ARIConnection:
                 self._update_error_stats(error_type)
                 self.stats.failed_operations += 1
                 
-                logger.warning(f"ARI operation failed (attempt {attempt + 1}/{self.retry_config.max_attempts}) for tenant {self.tenant_id}: {e} (Type: {error_type.value})")
+                logger.warning(f"ARI operation failed (attempt {attempt + 1}/{self.config.retry_attempts}) for tenant {self.tenant_id}: {e} (Type: {error_type.value})")
                 
                 # Check if we should retry
                 if not self._should_retry(error_type, attempt):
@@ -386,14 +316,15 @@ class ARIConnection:
                     await self._check_connection_health()
             
             # If we reach here, we're retrying - wait with exponential backoff
-            if attempt < self.retry_config.max_attempts - 1:
-                delay = self.retry_config.get_delay(attempt)
+            if attempt < self.config.retry_attempts - 1:
+                delay = self.config.retry_backoff * (2 ** attempt)
+                delay = min(delay, self.config.max_retry_delay)
                 self.stats.retry_attempts += 1
                 logger.info(f"Retrying ARI operation in {delay:.2f}s for tenant {self.tenant_id}")
                 await asyncio.sleep(delay)
         
         # All retry attempts exhausted
-        logger.error(f"ARI operation failed after {self.retry_config.max_attempts} attempts for tenant {self.tenant_id}")
+        logger.error(f"ARI operation failed after {self.config.retry_attempts} attempts for tenant {self.tenant_id}")
         await self._check_connection_health()
         return None
 
@@ -579,7 +510,7 @@ class ARIConnection:
             self.client.on_event('StasisStart', self._handle_stasis_start)
             self.client.on_event('StasisEnd', self._handle_stasis_end)
             self.client.on_event('ChannelStateChange', self._handle_channel_state_change)
-            
+
             logger.debug(f"ARI event handlers setup for tenant {self.tenant_id}")
         except Exception as e:
             logger.error(f"Failed to setup event handlers for tenant {self.tenant_id}: {e}")

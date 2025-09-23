@@ -19,7 +19,7 @@ from datetime import datetime, time
 from django.utils import timezone
 from django.db.models import Q
 
-from .models import Tenant, SystemConfiguration, CallSession
+from core.models import Tenant, SystemConfiguration, CallSession
 
 logger = logging.getLogger(__name__)
 

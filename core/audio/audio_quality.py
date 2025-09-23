@@ -19,15 +19,14 @@ import logging
 import audioop
 import math
 import struct
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from collections import deque, defaultdict
+from collections import deque
 
 from django.utils import timezone
-from core.rtp_server import AudioFrame
-from core.models import CallSession
+from core.junie_codes.rtp_server import AudioFrame
 
 logger = logging.getLogger(__name__)
 

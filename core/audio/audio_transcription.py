@@ -33,9 +33,19 @@ from core.audio.audio_recording import RecordingSession
 
 logger = logging.getLogger(__name__)
 
+# RIVA imports
+try:
+    from riva.client import SpeechRecognitionService, Auth
+    from riva.client.proto import riva_asr_pb2
+    RIVA_AVAILABLE = True
+except ImportError:
+    RIVA_AVAILABLE = False
+    logger.warning("RIVA client not available. Install nvidia-riva-client to use RIVA transcription.")
+
 
 class TranscriptionProvider(Enum):
     """Supported transcription service providers"""
+    NVIDIA_RIVA = "nvidia_riva"
     GOOGLE_SPEECH = "google_speech"
     AWS_TRANSCRIBE = "aws_transcribe"
     AZURE_SPEECH = "azure_speech"
@@ -69,7 +79,7 @@ class LanguageCode(Enum):
 @dataclass
 class TranscriptionConfig:
     """Configuration for audio transcription"""
-    provider: TranscriptionProvider = TranscriptionProvider.MOCK_SERVICE
+    provider: TranscriptionProvider = TranscriptionProvider.NVIDIA_RIVA
     mode: TranscriptionMode = TranscriptionMode.BATCH
     language: LanguageCode = LanguageCode.AUTO_DETECT
     enable_speaker_diarization: bool = True
@@ -313,11 +323,290 @@ class GoogleSpeechService(TranscriptionServiceInterface):
         return (self.api_key or self.credentials_path) and config.language in self.get_supported_languages()
 
 
+class RivaTranscriptionService(TranscriptionServiceInterface):
+    """NVIDIA RIVA ASR service integration"""
+    
+    def __init__(self):
+        self.riva_uri = getattr(settings, 'RIVA_ASR_URI', 'localhost:50051')
+        self.use_ssl = getattr(settings, 'RIVA_USE_SSL', False)
+        self.ssl_cert = getattr(settings, 'RIVA_SSL_CERT', None)
+        self.ssl_key = getattr(settings, 'RIVA_SSL_KEY', None)
+        self.ssl_root_certs = getattr(settings, 'RIVA_SSL_ROOT_CERTS', None)
+        
+        # Initialize RIVA auth and service
+        self.auth = None
+        self.service = None
+        if RIVA_AVAILABLE:
+            try:
+                self.auth = Auth(
+                    uri=self.riva_uri,
+                    use_ssl=self.use_ssl,
+                    ssl_cert=self.ssl_cert,
+                    ssl_key=self.ssl_key,
+                    ssl_root_certs=self.ssl_root_certs
+                )
+                self.service = SpeechRecognitionService(auth=self.auth)
+                logger.info(f"RIVA ASR service initialized with URI: {self.riva_uri}")
+            except Exception as e:
+                logger.error(f"Failed to initialize RIVA ASR service: {e}")
+                self.service = None
+        else:
+            logger.error("RIVA client not available - install nvidia-riva-client")
+    
+    async def transcribe_audio(
+        self, 
+        audio_data: bytes, 
+        config: TranscriptionConfig
+    ) -> TranscriptionResult:
+        """RIVA batch transcription"""
+        if not self.service or not RIVA_AVAILABLE:
+            logger.error("RIVA service not available")
+            return TranscriptionResult(
+                transcription_id=hashlib.md5(audio_data).hexdigest()[:16],
+                session_id="",
+                provider=TranscriptionProvider.NVIDIA_RIVA,
+                text="",
+                language_detected="unknown",
+                confidence_average=0.0,
+                segments=[],
+                processing_time_seconds=0.0,
+                audio_duration_seconds=0.0,
+                created_at=timezone.now(),
+                error_message="RIVA service not available",
+                success=False
+            )
+        
+        try:
+            start_time = datetime.now()
+            
+            # Configure RIVA ASR request
+            riva_config = riva_asr_pb2.RecognitionConfig()
+            riva_config.encoding = riva_asr_pb2.RecognitionConfig.AudioEncoding.LINEAR_PCM
+            riva_config.sample_rate_hertz = config.sample_rate
+            riva_config.language_code = self._map_language_to_riva(config.language)
+            riva_config.max_alternatives = config.max_alternatives
+            riva_config.enable_word_time_offsets = config.enable_word_timestamps
+            riva_config.enable_speaker_diarization = config.enable_speaker_diarization
+            riva_config.enable_automatic_punctuation = config.enable_punctuation
+            
+            # Add custom vocabulary if provided
+            if config.custom_vocabulary:
+                speech_context = riva_config.speech_contexts.add()
+                speech_context.phrases.extend(config.custom_vocabulary)
+            
+            # Create transcription request
+            request = riva_asr_pb2.RecognizeRequest(
+                config=riva_config,
+                audio=riva_asr_pb2.RecognitionAudio(content=audio_data)
+            )
+            
+            # Perform transcription
+            response = self.service.recognize(request)
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            # Process results
+            if response.results:
+                best_result = response.results[0]
+                best_alternative = best_result.alternatives[0] if best_result.alternatives else None
+                
+                if best_alternative:
+                    # Extract segments with word-level timestamps
+                    segments = []
+                    if best_alternative.words:
+                        for word in best_alternative.words:
+                            segment = TranscriptionSegment(
+                                text=word.word,
+                                start_time_seconds=word.start_time.seconds + word.start_time.nanos / 1e9,
+                                end_time_seconds=word.end_time.seconds + word.end_time.nanos / 1e9,
+                                confidence=word.confidence,
+                                speaker_id=getattr(word, 'speaker_tag', None)
+                            )
+                            segments.append(segment)
+                    else:
+                        # Fallback: create single segment for entire transcription
+                        segments.append(TranscriptionSegment(
+                            text=best_alternative.transcript,
+                            start_time_seconds=0.0,
+                            end_time_seconds=len(audio_data) / (config.sample_rate * 2),  # Estimate duration
+                            confidence=best_alternative.confidence,
+                            speaker_id=None
+                        ))
+                    
+                    # Calculate average confidence
+                    avg_confidence = sum(s.confidence for s in segments) / len(segments) if segments else 0.0
+                    
+                    return TranscriptionResult(
+                        transcription_id=hashlib.md5(audio_data).hexdigest()[:16],
+                        session_id="",
+                        provider=TranscriptionProvider.NVIDIA_RIVA,
+                        text=best_alternative.transcript,
+                        language_detected=riva_config.language_code,
+                        confidence_average=avg_confidence,
+                        segments=segments,
+                        processing_time_seconds=processing_time,
+                        audio_duration_seconds=len(audio_data) / (config.sample_rate * 2),
+                        created_at=timezone.now(),
+                        success=True
+                    )
+            
+            # No results case
+            return TranscriptionResult(
+                transcription_id=hashlib.md5(audio_data).hexdigest()[:16],
+                session_id="",
+                provider=TranscriptionProvider.NVIDIA_RIVA,
+                text="",
+                language_detected=riva_config.language_code,
+                confidence_average=0.0,
+                segments=[],
+                processing_time_seconds=processing_time,
+                audio_duration_seconds=len(audio_data) / (config.sample_rate * 2),
+                created_at=timezone.now(),
+                error_message="No transcription results returned",
+                success=False
+            )
+            
+        except Exception as e:
+            logger.error(f"RIVA transcription error: {e}")
+            return TranscriptionResult(
+                transcription_id=hashlib.md5(audio_data).hexdigest()[:16],
+                session_id="",
+                provider=TranscriptionProvider.NVIDIA_RIVA,
+                text="",
+                language_detected="unknown",
+                confidence_average=0.0,
+                segments=[],
+                processing_time_seconds=0.0,
+                audio_duration_seconds=0.0,
+                created_at=timezone.now(),
+                error_message=str(e),
+                success=False
+            )
+    
+    async def transcribe_streaming(
+        self, 
+        audio_stream: Any, 
+        config: TranscriptionConfig,
+        callback: Callable[[TranscriptionSegment], None]
+    ) -> bool:
+        """RIVA streaming transcription"""
+        if not self.service or not RIVA_AVAILABLE:
+            logger.error("RIVA service not available for streaming")
+            return False
+        
+        try:
+            # Configure streaming request
+            riva_config = riva_asr_pb2.RecognitionConfig()
+            riva_config.encoding = riva_asr_pb2.RecognitionConfig.AudioEncoding.LINEAR_PCM
+            riva_config.sample_rate_hertz = config.sample_rate
+            riva_config.language_code = self._map_language_to_riva(config.language)
+            riva_config.enable_word_time_offsets = config.enable_word_timestamps
+            riva_config.enable_speaker_diarization = config.enable_speaker_diarization
+            riva_config.enable_automatic_punctuation = config.enable_punctuation
+            
+            streaming_config = riva_asr_pb2.StreamingRecognitionConfig(
+                config=riva_config,
+                interim_results=True
+            )
+            
+            # Generator function for audio chunks
+            def audio_generator():
+                # Initial request with config
+                yield riva_asr_pb2.StreamingRecognizeRequest(streaming_config=streaming_config)
+                
+                # Stream audio chunks
+                for audio_chunk in audio_stream:
+                    yield riva_asr_pb2.StreamingRecognizeRequest(audio_content=audio_chunk)
+            
+            # Start streaming
+            responses = self.service.streaming_recognize(audio_generator())
+            
+            for response in responses:
+                if response.results:
+                    for result in response.results:
+                        if result.alternatives:
+                            alternative = result.alternatives[0]
+                            
+                            # Create segment from streaming result
+                            segment = TranscriptionSegment(
+                                text=alternative.transcript,
+                                start_time_seconds=0.0,  # Streaming doesn't provide absolute timing
+                                end_time_seconds=0.0,
+                                confidence=alternative.confidence,
+                                speaker_id=None
+                            )
+                            
+                            # Call callback with segment
+                            callback(segment)
+                            
+                            # If this is a final result, we can extract word timings
+                            if result.is_final and alternative.words:
+                                for word in alternative.words:
+                                    word_segment = TranscriptionSegment(
+                                        text=word.word,
+                                        start_time_seconds=word.start_time.seconds + word.start_time.nanos / 1e9,
+                                        end_time_seconds=word.end_time.seconds + word.end_time.nanos / 1e9,
+                                        confidence=word.confidence,
+                                        speaker_id=getattr(word, 'speaker_tag', None)
+                                    )
+                                    callback(word_segment)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"RIVA streaming transcription error: {e}")
+            return False
+    
+    def get_supported_languages(self) -> List[LanguageCode]:
+        """Get RIVA supported languages"""
+        return [
+            LanguageCode.ENGLISH_US,
+            LanguageCode.ENGLISH_GB,
+            LanguageCode.SPANISH_ES,
+            LanguageCode.FRENCH_FR,
+            LanguageCode.GERMAN_DE,
+            LanguageCode.ITALIAN_IT,
+            LanguageCode.PORTUGUESE_BR,
+            LanguageCode.RUSSIAN_RU,
+            LanguageCode.CHINESE_CN,
+            LanguageCode.JAPANESE_JP,
+            LanguageCode.AUTO_DETECT
+        ]
+    
+    def validate_config(self, config: TranscriptionConfig) -> bool:
+        """Validate RIVA configuration"""
+        if not RIVA_AVAILABLE or not self.service:
+            return False
+        
+        return (
+            config.language in self.get_supported_languages() and
+            config.sample_rate in [8000, 16000, 22050, 44100] and
+            config.max_alternatives <= 10
+        )
+    
+    def _map_language_to_riva(self, language: LanguageCode) -> str:
+        """Map LanguageCode to RIVA language codes"""
+        mapping = {
+            LanguageCode.ENGLISH_US: "en-US",
+            LanguageCode.ENGLISH_GB: "en-GB",
+            LanguageCode.SPANISH_ES: "es-ES",
+            LanguageCode.FRENCH_FR: "fr-FR",
+            LanguageCode.GERMAN_DE: "de-DE",
+            LanguageCode.ITALIAN_IT: "it-IT",
+            LanguageCode.PORTUGUESE_BR: "pt-BR",
+            LanguageCode.RUSSIAN_RU: "ru-RU",
+            LanguageCode.CHINESE_CN: "zh-CN",
+            LanguageCode.JAPANESE_JP: "ja-JP",
+            LanguageCode.AUTO_DETECT: "en-US"  # Default to English for auto-detect
+        }
+        return mapping.get(language, "en-US")
+
+
 class AudioTranscriptionManager:
     """Manager for audio transcription operations"""
     
     def __init__(self):
         self.services: Dict[TranscriptionProvider, TranscriptionServiceInterface] = {
+            TranscriptionProvider.NVIDIA_RIVA: RivaTranscriptionService(),
             TranscriptionProvider.MOCK_SERVICE: MockTranscriptionService(),
             TranscriptionProvider.GOOGLE_SPEECH: GoogleSpeechService(),
         }
@@ -562,7 +851,7 @@ def get_transcription_manager() -> AudioTranscriptionManager:
 async def transcribe_session(
     session_id: str,
     audio_data: bytes,
-    provider: TranscriptionProvider = TranscriptionProvider.MOCK_SERVICE,
+    provider: TranscriptionProvider = TranscriptionProvider.NVIDIA_RIVA,
     language: LanguageCode = LanguageCode.AUTO_DETECT
 ) -> Optional[TranscriptionResult]:
     """Convenient function to transcribe session audio"""
@@ -573,7 +862,7 @@ async def transcribe_session(
 
 async def transcribe_call_recording(
     recording_session: RecordingSession,
-    provider: TranscriptionProvider = TranscriptionProvider.MOCK_SERVICE
+    provider: TranscriptionProvider = TranscriptionProvider.NVIDIA_RIVA
 ) -> Optional[TranscriptionResult]:
     """Convenient function to transcribe call recording"""
     manager = get_transcription_manager()
@@ -586,7 +875,7 @@ def get_supported_providers() -> List[TranscriptionProvider]:
     return list(TranscriptionProvider)
 
 
-def get_supported_languages(provider: TranscriptionProvider = TranscriptionProvider.MOCK_SERVICE) -> List[LanguageCode]:
+def get_supported_languages(provider: TranscriptionProvider = TranscriptionProvider.NVIDIA_RIVA) -> List[LanguageCode]:
     """Get supported languages for provider"""
     manager = get_transcription_manager()
     service = manager.services.get(provider)

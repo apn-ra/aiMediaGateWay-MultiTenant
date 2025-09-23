@@ -65,7 +65,6 @@ class AMIConnection:
                     return True
                     
                 logger.info(f"Connecting to AMI for tenant {self.tenant_id}")
-                
                 self.manager = panoramisk.Manager(
                     host=self.config.host,
                     port=self.config.port,
@@ -73,7 +72,9 @@ class AMIConnection:
                     secret=self.config.secret,
                     timeout=self.config.timeout
                 )
-                
+                # Setup event handlers
+                await self._setup_event_handlers()
+
                 # Connect with timeout
                 try:
                     await asyncio.wait_for(
@@ -83,10 +84,7 @@ class AMIConnection:
                 except asyncio.TimeoutError:
                     logger.error(f"AMI connection timeout for tenant {self.tenant_id}")
                     return False
-                
-                # Setup event handlers
-                await self._setup_event_handlers()
-                
+
                 # Update statistics
                 self.stats.connected_at = timezone.now()
                 self.stats.is_healthy = True
@@ -94,7 +92,7 @@ class AMIConnection:
                 
                 # Start ping task for connection monitoring
                 await self._start_ping_task()
-                
+
                 logger.info(f"AMI connected successfully for tenant {self.tenant_id}")
                 return True
                 
@@ -184,7 +182,11 @@ class AMIConnection:
                     break
                     
                 # Send ping command
-                response = await self.send_command('Ping')
+                response = await self.manager.send_action({
+                    'Action': 'Ping',
+                    'ActionID': 'my-ping-1'
+                })
+
                 if not response or response.get('Response') != 'Success':
                     logger.warning(f"AMI ping failed for tenant {self.tenant_id}")
                     await self._schedule_reconnect()
@@ -322,32 +324,43 @@ class AMIManager:
         try:
             # Get tenant
             tenant = await asyncio.to_thread(
-                Tenant.objects.get, 
+                Tenant.objects.get,
                 id=tenant_id
             )
             
-            # Get AMI configuration from SystemConfiguration
-            ami_configs = await asyncio.to_thread(
-                lambda: list(SystemConfiguration.objects.filter(
-                    tenant=tenant,
-                    key__startswith='ami_'
-                ))
-            )
-            
-            config_dict = {config.key: config.get_typed_value() for config in ami_configs}
+            # # Get AMI configuration from SystemConfiguration
+            # ami_configs = await asyncio.to_thread(
+            #     lambda: list(SystemConfiguration.objects.filter(
+            #         tenant=tenant,
+            #         key__startswith='ami_'
+            #     ))
+            # )
+            #
+            # config_dict = {config.key: config.get_typed_value() for config in ami_configs}
             
             # Build AMI configuration
+            # ami_config = AMIConnectionConfig(
+            #     host=config_dict.get('ami_host', 'localhost'),
+            #     port=config_dict.get('ami_port', 5038),
+            #     username=config_dict.get('ami_username', ''),
+            #     secret=config_dict.get('ami_secret', ''),
+            #     timeout=config_dict.get('ami_timeout', 30.0),
+            #     max_retries=config_dict.get('ami_max_retries', 3),
+            #     retry_delay=config_dict.get('ami_retry_delay', 5.0),
+            #     ping_interval=config_dict.get('ami_ping_interval', 30.0)
+            #)
             ami_config = AMIConnectionConfig(
-                host=config_dict.get('ami_host', 'localhost'),
-                port=config_dict.get('ami_port', 5038),
-                username=config_dict.get('ami_username', ''),
-                secret=config_dict.get('ami_secret', ''),
-                timeout=config_dict.get('ami_timeout', 30.0),
-                max_retries=config_dict.get('ami_max_retries', 3),
-                retry_delay=config_dict.get('ami_retry_delay', 5.0),
-                ping_interval=config_dict.get('ami_ping_interval', 30.0)
+                host=tenant.host,
+                port=tenant.ami_port,
+                username=tenant.ami_username,
+                secret=tenant.ami_secret,
+                timeout=30.0,
+                max_retries=3,
+                retry_delay=5.0,
+                ping_interval=30.0
             )
-            
+
+
             if not ami_config.username or not ami_config.secret:
                 logger.error(f"AMI credentials not configured for tenant {tenant_id}")
                 return None

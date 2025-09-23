@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from django.utils import timezone
 
 from core.session.session_manager import get_session_manager, CallSessionData
-from core.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
+from core.junie_codes.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ class RTPSessionIntegrator:
             session = await self.session_manager.get_session(session_id)
             if session:
                 # Update session metadata with RTP info
-                session.session_metadata.update({
+                session.metadata.update({
                     'rtp_integration': {
                         'endpoint_port': endpoint.local_port,
                         'codec': endpoint.codec,
@@ -331,7 +331,7 @@ class RTPSessionIntegrator:
         """Synchronize active sessions with RTP integrations"""
         try:
             # Get all active sessions
-            active_sessions = await self.session_manager.get_active_sessions()
+            active_sessions = await self.session_manager.get_tenant_sessions()
             
             # Check for sessions that should be integrated but aren't
             for session in active_sessions:
@@ -357,7 +357,7 @@ class RTPSessionIntegrator:
                 return False
             
             # Check if session has audio requirements
-            metadata = session.session_metadata or {}
+            metadata = session.metadata or {}
             routing_metadata = metadata.get('routing_metadata', {})
             
             # Sessions that require external media should be integrated

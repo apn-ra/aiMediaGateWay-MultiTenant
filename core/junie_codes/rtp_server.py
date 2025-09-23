@@ -21,9 +21,9 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.conf import settings
 import collections
-import audioop
+import numpy as np
 
-from .models import Tenant
+from core.models import Tenant
 from core.session.session_manager import get_session_manager
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class AudioBuffer:
     - Late packet handling
     - Buffer overflow protection
     """
-    
+
     def __init__(self, buffer_size: int = 50, max_delay_ms: int = 200):
         self.buffer_size = buffer_size
         self.max_delay_ms = max_delay_ms
@@ -105,57 +105,57 @@ class AudioBuffer:
             'packets_reordered': 0,
             'buffer_overflows': 0
         }
-        
+
     def add_packet(self, packet: RTPPacket) -> bool:
         """Add packet to jitter buffer"""
         try:
             seq_num = packet.header.sequence_number
-            
+
             # Handle sequence number wraparound
             if self.expected_seq == 0:
                 self.expected_seq = seq_num
-            
+
             # Check if packet is too late
             if self._is_packet_too_late(seq_num):
                 self.stats['packets_dropped'] += 1
                 logger.debug(f"Dropped late packet: seq={seq_num}")
                 return False
-            
+
             # Check for buffer overflow
             if len(self.packets) >= self.buffer_size:
                 self._handle_buffer_overflow()
-            
+
             # Store packet
             self.packets[seq_num] = packet
             self.stats['packets_buffered'] += 1
-            
+
             # Track reordered packets
             if seq_num < self.expected_seq:
                 self.stats['packets_reordered'] += 1
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error adding packet to buffer: {e}")
             return False
-    
+
     def get_next_packets(self, max_packets: int = 10) -> List[RTPPacket]:
         """Get next ready packets from buffer in sequence order"""
         try:
             ready_packets = []
-            
+
             # Start buffering timing if first packet
             if self.buffer_start_time is None and self.packets:
                 self.buffer_start_time = timezone.now()
-            
+
             # Check if we should start processing (minimum buffering delay)
             if not self._is_ready_to_process():
                 return ready_packets
-            
+
             # Get consecutive packets starting from expected sequence
             current_seq = self.expected_seq
             packets_retrieved = 0
-            
+
             while packets_retrieved < max_packets:
                 if current_seq in self.packets:
                     packet = self.packets.pop(current_seq)
@@ -166,53 +166,53 @@ class AudioBuffer:
                 else:
                     # Gap in sequence - stop processing
                     break
-            
+
             # Update expected sequence
             if ready_packets:
                 self.expected_seq = (self.last_processed_seq + 1) % 65536
-            
+
             return ready_packets
-            
+
         except Exception as e:
             logger.error(f"Error getting packets from buffer: {e}")
             return []
-    
+
     def _is_packet_too_late(self, seq_num: int) -> bool:
         """Check if packet arrived too late to be useful"""
         if self.last_processed_seq == -1:
             return False
-        
+
         # Calculate sequence difference handling wraparound
         seq_diff = (seq_num - self.last_processed_seq) % 65536
         if seq_diff > 32768:  # Negative difference (packet is late)
             seq_diff = seq_diff - 65536
-        
+
         return seq_diff < -10  # Allow up to 10 packets behind
-    
+
     def _handle_buffer_overflow(self):
         """Handle buffer overflow by dropping oldest packets"""
         if not self.packets:
             return
-        
+
         # Drop oldest packets (lowest sequence numbers)
         sorted_seqs = sorted(self.packets.keys())
         packets_to_drop = len(sorted_seqs) // 4  # Drop 25% of buffer
-        
+
         for seq in sorted_seqs[:packets_to_drop]:
             self.packets.pop(seq, None)
-        
+
         self.stats['buffer_overflows'] += 1
         logger.warning(f"Buffer overflow: dropped {packets_to_drop} packets")
-    
+
     def _is_ready_to_process(self) -> bool:
         """Check if buffer has enough packets/time to start processing"""
         if not self.packets or self.buffer_start_time is None:
             return False
-        
+
         # Wait for minimum buffer time
         elapsed_ms = (timezone.now() - self.buffer_start_time).total_seconds() * 1000
         return elapsed_ms >= (self.max_delay_ms / 4)  # Start at 25% of max delay
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get buffer statistics"""
         return {
@@ -233,7 +233,7 @@ class AudioProcessor:
     - Audio level normalization
     - Real-time streaming preparation
     """
-    
+
     def __init__(self):
         self.conversion_cache: Dict[str, bytes] = {}
         self.stats = {
@@ -241,7 +241,7 @@ class AudioProcessor:
             'conversion_errors': 0,
             'total_bytes_processed': 0
         }
-    
+
     async def process_packet(self, packet: RTPPacket, target_codec: str = None) -> Optional[AudioFrame]:
         """Process RTP packet into audio frame"""
         try:
@@ -250,18 +250,18 @@ class AudioProcessor:
             if not codec_info:
                 logger.warning(f"Unknown codec for payload type {packet.header.payload_type}")
                 return None
-            
+
             source_codec = codec_info['name']
             target_codec = target_codec or source_codec
-            
+
             # Convert audio format if needed
             processed_payload = await self._convert_audio_format(
                 packet.payload, source_codec, target_codec
             )
-            
+
             if processed_payload is None:
                 return None
-            
+
             # Create audio frame
             frame = AudioFrame(
                 sequence_number=packet.header.sequence_number,
@@ -271,78 +271,249 @@ class AudioProcessor:
                 processed_time=timezone.now(),
                 original_packet=packet
             )
-            
+
             # Update statistics
             self.stats['frames_processed'] += 1
             self.stats['total_bytes_processed'] += len(processed_payload)
-            
+
             return frame
-            
+
         except Exception as e:
             logger.error(f"Error processing audio packet: {e}")
             self.stats['conversion_errors'] += 1
             return None
-    
+
     async def _convert_audio_format(self, payload: bytes, source_codec: str, target_codec: str) -> Optional[bytes]:
         """Convert audio between different formats"""
         try:
             if source_codec == target_codec:
                 return payload
-            
+
             # Create cache key
             cache_key = f"{source_codec}_{target_codec}_{len(payload)}"
             if cache_key in self.conversion_cache:
                 return self.conversion_cache[cache_key]
-            
+
             converted_payload = payload  # Start with original
-            
+
             # Convert from source to linear PCM first
             if source_codec == 'ulaw':
-                converted_payload = audioop.ulaw2lin(payload, 2)
+                converted_payload = self._ulaw2lin(payload)
             elif source_codec == 'alaw':
-                converted_payload = audioop.alaw2lin(payload, 2)
+                converted_payload = self._alaw2lin(payload)
             elif source_codec == 'gsm':
                 # GSM conversion would need external library
                 logger.warning("GSM codec conversion not implemented")
                 return payload
-            
+
             # Convert from linear PCM to target format
             if target_codec == 'ulaw' and source_codec != 'ulaw':
-                converted_payload = audioop.lin2ulaw(converted_payload, 2)
+                converted_payload = self._lin2ulaw(converted_payload)
             elif target_codec == 'alaw' and source_codec != 'alaw':
-                converted_payload = audioop.lin2alaw(converted_payload, 2)
-            
+                converted_payload = self._lin2alaw(converted_payload)
+
             # Cache result for performance (limit cache size)
             if len(self.conversion_cache) < 100:
                 self.conversion_cache[cache_key] = converted_payload
-            
+
             return converted_payload
-            
+
         except Exception as e:
             logger.error(f"Error converting audio from {source_codec} to {target_codec}: {e}")
             return None
-    
+
     def normalize_audio_level(self, payload: bytes, target_level: float = 0.8) -> bytes:
         """Normalize audio level to target amplitude"""
         try:
             # Calculate current RMS level
-            current_rms = audioop.rms(payload, 2)
+            current_rms = self._calculate_rms(payload)
             if current_rms == 0:
                 return payload
-            
+
             # Calculate scaling factor
             max_level = 32767 * target_level  # 16-bit max * target level
             scale_factor = max_level / current_rms
-            
+
             # Apply scaling (with clipping protection)
             scale_factor = min(scale_factor, 4.0)  # Max 4x amplification
-            
-            return audioop.mul(payload, 2, scale_factor)
-            
+
+            return self._multiply_audio(payload, scale_factor)
+
         except Exception as e:
             logger.error(f"Error normalizing audio level: {e}")
             return payload
-    
+
+    def _ulaw2lin(self, payload: bytes) -> bytes:
+        """Convert μ-law encoded audio to linear PCM using numpy"""
+        try:
+            # Convert bytes to numpy array of uint8
+            ulaw_data = np.frombuffer(payload, dtype=np.uint8)
+
+            # μ-law to linear conversion algorithm
+            # Flip all bits except sign bit
+            sign = (ulaw_data & 0x80) >> 7
+            magnitude = ulaw_data & 0x7F
+
+            # Decode the magnitude
+            exp = (magnitude & 0x70) >> 4
+            mantissa = magnitude & 0x0F
+
+            # Calculate linear value
+            linear = np.where(exp == 0,
+                              (mantissa << 4) + 132,
+                              ((mantissa << 4) + 132) << (exp - 1))
+
+            # Apply sign
+            linear = np.where(sign == 1, -linear, linear)
+
+            # Convert to 16-bit signed integers
+            return linear.astype(np.int16).tobytes()
+
+        except Exception as e:
+            logger.error(f"Error in ulaw2lin conversion: {e}")
+            return payload
+
+    def _alaw2lin(self, payload: bytes) -> bytes:
+        """Convert A-law encoded audio to linear PCM using numpy"""
+        try:
+            # Convert bytes to numpy array of uint8
+            alaw_data = np.frombuffer(payload, dtype=np.uint8)
+
+            # A-law to linear conversion algorithm
+            # Invert even bits
+            alaw_data ^= 0x55
+
+            sign = (alaw_data & 0x80) >> 7
+            magnitude = alaw_data & 0x7F
+
+            # Decode the magnitude
+            exp = (magnitude & 0x70) >> 4
+            mantissa = magnitude & 0x0F
+
+            # Calculate linear value
+            linear = np.where(exp == 0,
+                              (mantissa << 4) + 8,
+                              ((mantissa << 4) + 264) << (exp - 1))
+
+            # Apply sign
+            linear = np.where(sign == 1, -linear, linear)
+
+            # Convert to 16-bit signed integers
+            return linear.astype(np.int16).tobytes()
+
+        except Exception as e:
+            logger.error(f"Error in alaw2lin conversion: {e}")
+            return payload
+
+    def _lin2ulaw(self, payload: bytes) -> bytes:
+        """Convert linear PCM to μ-law encoded audio using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            linear_data = np.frombuffer(payload, dtype=np.int16)
+
+            # Get sign and magnitude
+            sign = (linear_data < 0).astype(np.uint8) << 7
+            magnitude = np.abs(linear_data).astype(np.int32)
+
+            # Clamp to 14-bit range
+            magnitude = np.minimum(magnitude, 8159)
+
+            # Add bias
+            magnitude += 132
+
+            # Find exponent
+            exp = np.zeros_like(magnitude, dtype=np.uint8)
+            for i in range(7, -1, -1):
+                mask = magnitude >= (256 << i)
+                exp = np.where(mask & (exp == 0), i + 1, exp)
+
+            # Calculate mantissa
+            mantissa = np.where(exp == 0,
+                                (magnitude >> 4) & 0x0F,
+                                ((magnitude >> (exp + 3)) & 0x0F))
+
+            # Combine components
+            ulaw = sign | (exp << 4) | mantissa
+
+            # Invert all bits
+            ulaw ^= 0xFF
+
+            return ulaw.astype(np.uint8).tobytes()
+
+        except Exception as e:
+            logger.error(f"Error in lin2ulaw conversion: {e}")
+            return payload
+
+    def _lin2alaw(self, payload: bytes) -> bytes:
+        """Convert linear PCM to A-law encoded audio using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            linear_data = np.frombuffer(payload, dtype=np.int16)
+
+            # Get sign and magnitude
+            sign = (linear_data < 0).astype(np.uint8) << 7
+            magnitude = np.abs(linear_data).astype(np.int32)
+
+            # Clamp to 12-bit range
+            magnitude = np.minimum(magnitude, 4095)
+
+            # Find exponent
+            exp = np.zeros_like(magnitude, dtype=np.uint8)
+            for i in range(7, -1, -1):
+                mask = magnitude >= (256 << i)
+                exp = np.where(mask & (exp == 0), i + 1, exp)
+
+            # Calculate mantissa
+            mantissa = np.where(exp == 0,
+                                (magnitude >> 4) & 0x0F,
+                                ((magnitude >> (exp + 3)) & 0x0F))
+
+            # Combine components
+            alaw = sign | (exp << 4) | mantissa
+
+            # Invert even bits
+            alaw ^= 0x55
+
+            return alaw.astype(np.uint8).tobytes()
+
+        except Exception as e:
+            logger.error(f"Error in lin2alaw conversion: {e}")
+            return payload
+
+    def _calculate_rms(self, payload: bytes) -> float:
+        """Calculate RMS (Root Mean Square) value of audio data using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            audio_data = np.frombuffer(payload, dtype=np.int16)
+
+            # Calculate RMS
+            rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
+
+            return float(rms)
+
+        except Exception as e:
+            logger.error(f"Error calculating RMS: {e}")
+            return 0.0
+
+    def _multiply_audio(self, payload: bytes, scale_factor: float) -> bytes:
+        """Multiply audio samples by scale factor using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            audio_data = np.frombuffer(payload, dtype=np.int16)
+
+            # Apply scaling
+            scaled_data = audio_data.astype(np.float64) * scale_factor
+
+            # Clamp to int16 range to prevent overflow
+            scaled_data = np.clip(scaled_data, -32768, 32767)
+
+            # Convert back to int16
+            return scaled_data.astype(np.int16).tobytes()
+
+        except Exception as e:
+            logger.error(f"Error multiplying audio: {e}")
+            return payload
+
     def get_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
         return self.stats.copy()
@@ -359,48 +530,48 @@ class RTPQualityMonitor:
     - Call quality scoring (MOS estimation)
     - Network condition assessment
     """
-    
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.start_time = timezone.now()
         self.last_update = timezone.now()
-        
+
         # Packet tracking
         self.total_packets_expected = 0
         self.total_packets_received = 0
         self.last_sequence_number = None
         self.sequence_gaps = []
-        
+
         # Jitter tracking
         self.jitter_samples = collections.deque(maxlen=1000)  # Keep last 1000 samples
         self.transit_times = collections.deque(maxlen=100)
         self.instantaneous_jitter = 0.0
         self.average_jitter = 0.0
-        
+
         # Bandwidth tracking
         self.bandwidth_samples = collections.deque(maxlen=60)  # 1 minute of samples
         self.current_bandwidth = 0.0
         self.peak_bandwidth = 0.0
         self.bytes_received = 0
-        
+
         # Quality metrics
         self.quality_scores = collections.deque(maxlen=100)
         self.current_mos = 0.0
-        
+
         # Timing tracking
         self.packet_arrival_times = collections.deque(maxlen=100)
-        
+
     def update_with_packet(self, packet: RTPPacket):
         """Update quality metrics with new packet"""
         try:
             current_time = timezone.now()
             seq_num = packet.header.sequence_number
             timestamp = packet.header.timestamp
-            
+
             # Update packet counts
             self.total_packets_received += 1
             self.bytes_received += packet.size
-            
+
             # Calculate expected packets (handle sequence number gaps)
             if self.last_sequence_number is not None:
                 expected_next = (self.last_sequence_number + 1) % 65536
@@ -409,101 +580,101 @@ class RTPQualityMonitor:
                     if gap > 0:
                         self.sequence_gaps.append(gap)
                         self.total_packets_expected += gap
-            
+
             self.last_sequence_number = seq_num
             self.total_packets_expected += 1
-            
+
             # Update jitter calculations
             self._update_jitter(packet, current_time)
-            
+
             # Update bandwidth calculations
             self._update_bandwidth(packet.size, current_time)
-            
+
             # Store packet arrival time
             self.packet_arrival_times.append(current_time)
-            
+
             # Update quality score
             self._calculate_quality_score()
-            
+
             self.last_update = current_time
-            
+
         except Exception as e:
             logger.error(f"Error updating quality metrics: {e}")
-    
+
     def _calculate_sequence_gap(self, expected: int, received: int) -> int:
         """Calculate gap in sequence numbers handling wraparound"""
         gap = (received - expected) % 65536
         if gap > 32768:  # Wraparound case
             gap = gap - 65536
         return max(0, gap - 1)  # -1 because we're looking at the gap, not including the received packet
-    
+
     def _update_jitter(self, packet: RTPPacket, arrival_time: datetime):
         """Update jitter calculations based on RFC 3550"""
         try:
             # Convert arrival time to timestamp units (assuming 8kHz sample rate)
             arrival_timestamp = int(arrival_time.timestamp() * 8000)
             rtp_timestamp = packet.header.timestamp
-            
+
             # Calculate transit time
             transit = arrival_timestamp - rtp_timestamp
             self.transit_times.append(transit)
-            
+
             # Calculate jitter if we have previous transit time
             if len(self.transit_times) >= 2:
                 d = abs(transit - self.transit_times[-2])
-                
+
                 # RFC 3550 jitter calculation
                 self.instantaneous_jitter += (d - self.instantaneous_jitter) / 16.0
                 self.jitter_samples.append(self.instantaneous_jitter)
-                
+
                 # Calculate average jitter
                 if self.jitter_samples:
                     self.average_jitter = sum(self.jitter_samples) / len(self.jitter_samples)
-                    
+
         except Exception as e:
             logger.error(f"Error calculating jitter: {e}")
-    
+
     def _update_bandwidth(self, packet_size: int, current_time: datetime):
         """Update bandwidth calculations"""
         try:
             # Calculate bandwidth over 1-second intervals
             one_second_ago = current_time - timedelta(seconds=1)
-            
+
             # Add current sample
             self.bandwidth_samples.append({
                 'time': current_time,
                 'bytes': packet_size
             })
-            
+
             # Remove old samples
-            while (self.bandwidth_samples and 
+            while (self.bandwidth_samples and
                    self.bandwidth_samples[0]['time'] < one_second_ago):
                 self.bandwidth_samples.popleft()
-            
+
             # Calculate current bandwidth (bytes per second)
             if len(self.bandwidth_samples) > 1:
-                time_span = (self.bandwidth_samples[-1]['time'] - 
-                           self.bandwidth_samples[0]['time']).total_seconds()
+                time_span = (self.bandwidth_samples[-1]['time'] -
+                             self.bandwidth_samples[0]['time']).total_seconds()
                 if time_span > 0:
                     total_bytes = sum(sample['bytes'] for sample in self.bandwidth_samples)
                     self.current_bandwidth = total_bytes / time_span
                     self.peak_bandwidth = max(self.peak_bandwidth, self.current_bandwidth)
-                    
+
         except Exception as e:
             logger.error(f"Error calculating bandwidth: {e}")
-    
+
     def _calculate_quality_score(self):
         """Calculate MOS (Mean Opinion Score) estimate based on network metrics"""
         try:
             # Base MOS score
             mos = 4.5
-            
+
             # Packet loss penalty
             packet_loss_rate = self.get_packet_loss_rate()
             if packet_loss_rate > 0:
                 # Each 1% packet loss reduces MOS by ~0.1
                 mos -= min(packet_loss_rate * 10, 2.0)
-            
+
             # Jitter penalty
             if self.average_jitter > 0:
                 # High jitter (>50ms) significantly impacts quality
@@ -512,23 +683,23 @@ class RTPQualityMonitor:
                     mos -= min((jitter_ms - 50) / 50, 1.5)
                 elif jitter_ms > 20:
                     mos -= (jitter_ms - 20) / 100
-            
+
             # Ensure MOS stays in valid range
             self.current_mos = max(1.0, min(5.0, mos))
             self.quality_scores.append(self.current_mos)
-            
+
         except Exception as e:
             logger.error(f"Error calculating quality score: {e}")
             self.current_mos = 0.0
-    
+
     def get_packet_loss_rate(self) -> float:
         """Calculate packet loss rate as percentage"""
         if self.total_packets_expected == 0:
             return 0.0
-        
+
         packets_lost = self.total_packets_expected - self.total_packets_received
         return (packets_lost / self.total_packets_expected) * 100.0
-    
+
     def get_jitter_stats(self) -> Dict[str, float]:
         """Get comprehensive jitter statistics"""
         if not self.jitter_samples:
@@ -538,20 +709,20 @@ class RTPQualityMonitor:
                 'max_jitter_ms': 0.0,
                 'min_jitter_ms': 0.0
             }
-        
+
         # Convert from timestamp units to milliseconds (assuming 8kHz)
         current_jitter_ms = self.instantaneous_jitter / 8.0
         average_jitter_ms = self.average_jitter / 8.0
         max_jitter_ms = max(self.jitter_samples) / 8.0
         min_jitter_ms = min(self.jitter_samples) / 8.0
-        
+
         return {
             'current_jitter_ms': current_jitter_ms,
             'average_jitter_ms': average_jitter_ms,
             'max_jitter_ms': max_jitter_ms,
             'min_jitter_ms': min_jitter_ms
         }
-    
+
     def get_bandwidth_stats(self) -> Dict[str, float]:
         """Get bandwidth utilization statistics"""
         return {
@@ -561,14 +732,14 @@ class RTPQualityMonitor:
             'peak_bandwidth_kbps': self.peak_bandwidth / 1024,
             'total_bytes_received': self.bytes_received
         }
-    
+
     def get_quality_report(self) -> Dict[str, Any]:
         """Generate comprehensive quality report"""
         session_duration = (self.last_update - self.start_time).total_seconds()
-        
+
         # Calculate average MOS
         avg_mos = sum(self.quality_scores) / len(self.quality_scores) if self.quality_scores else 0.0
-        
+
         # Determine quality classification
         if self.current_mos >= 4.0:
             quality_class = "Excellent"
@@ -580,40 +751,40 @@ class RTPQualityMonitor:
             quality_class = "Poor"
         else:
             quality_class = "Bad"
-        
+
         return {
             'session_id': self.session_id,
             'session_duration_seconds': session_duration,
             'timestamp': self.last_update.isoformat(),
-            
+
             # Packet statistics
             'packets_received': self.total_packets_received,
             'packets_expected': self.total_packets_expected,
             'packets_lost': self.total_packets_expected - self.total_packets_received,
             'packet_loss_rate_percent': self.get_packet_loss_rate(),
             'sequence_gaps': len(self.sequence_gaps),
-            
+
             # Jitter statistics
             'jitter': self.get_jitter_stats(),
-            
+
             # Bandwidth statistics  
             'bandwidth': self.get_bandwidth_stats(),
-            
+
             # Quality metrics
             'current_mos': self.current_mos,
             'average_mos': avg_mos,
             'quality_classification': quality_class,
-            
+
             # Network condition assessment
             'network_condition': self._assess_network_condition()
         }
-    
+
     def _assess_network_condition(self) -> str:
         """Assess overall network condition based on metrics"""
         packet_loss = self.get_packet_loss_rate()
         jitter_stats = self.get_jitter_stats()
         avg_jitter_ms = jitter_stats['average_jitter_ms']
-        
+
         if packet_loss < 1.0 and avg_jitter_ms < 20:
             return "Excellent"
         elif packet_loss < 3.0 and avg_jitter_ms < 50:
@@ -633,7 +804,7 @@ class RTPStatisticsCollector:
     Aggregates statistics from multiple endpoints and provides
     system-wide monitoring and alerting capabilities.
     """
-    
+
     def __init__(self):
         self.quality_monitors: Dict[str, RTPQualityMonitor] = {}  # session_id -> monitor
         self.global_stats = {
@@ -646,11 +817,11 @@ class RTPStatisticsCollector:
         }
         self.alert_thresholds = {
             'packet_loss_rate': 5.0,  # 5% packet loss
-            'jitter_ms': 100.0,       # 100ms jitter
-            'quality_score': 3.0       # MOS below 3.0
+            'jitter_ms': 100.0,  # 100ms jitter
+            'quality_score': 3.0  # MOS below 3.0
         }
         self.active_alerts: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> alerts
-        
+
     def create_quality_monitor(self, session_id: str) -> RTPQualityMonitor:
         """Create quality monitor for new session"""
         monitor = RTPQualityMonitor(session_id)
@@ -658,43 +829,43 @@ class RTPStatisticsCollector:
         self.global_stats['total_sessions'] += 1
         self.global_stats['active_sessions'] += 1
         return monitor
-    
+
     def remove_quality_monitor(self, session_id: str):
         """Remove quality monitor for ended session"""
         if session_id in self.quality_monitors:
             del self.quality_monitors[session_id]
             self.global_stats['active_sessions'] = len(self.quality_monitors)
             self.active_alerts.pop(session_id, None)
-    
+
     def update_global_stats(self):
         """Update global statistics from all monitors"""
         try:
             if not self.quality_monitors:
                 return
-            
+
             total_packets = sum(m.total_packets_received for m in self.quality_monitors.values())
             total_bytes = sum(m.bytes_received for m in self.quality_monitors.values())
             quality_scores = [m.current_mos for m in self.quality_monitors.values() if m.current_mos > 0]
-            
+
             self.global_stats.update({
                 'active_sessions': len(self.quality_monitors),
                 'total_packets_processed': total_packets,
                 'total_bytes_processed': total_bytes,
                 'average_quality_score': sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
             })
-            
+
             # Check for system-wide alerts
             self._check_system_alerts()
-            
+
         except Exception as e:
             logger.error(f"Error updating global statistics: {e}")
-    
+
     def _check_system_alerts(self):
         """Check for alert conditions across all sessions"""
         try:
             for session_id, monitor in self.quality_monitors.items():
                 alerts = []
-                
+
                 # Check packet loss threshold
                 packet_loss = monitor.get_packet_loss_rate()
                 if packet_loss > self.alert_thresholds['packet_loss_rate']:
@@ -705,7 +876,7 @@ class RTPStatisticsCollector:
                         'threshold': self.alert_thresholds['packet_loss_rate'],
                         'timestamp': timezone.now().isoformat()
                     })
-                
+
                 # Check jitter threshold
                 jitter_stats = monitor.get_jitter_stats()
                 avg_jitter = jitter_stats['average_jitter_ms']
@@ -717,7 +888,7 @@ class RTPStatisticsCollector:
                         'threshold': self.alert_thresholds['jitter_ms'],
                         'timestamp': timezone.now().isoformat()
                     })
-                
+
                 # Check quality score threshold
                 if monitor.current_mos < self.alert_thresholds['quality_score']:
                     alerts.append({
@@ -727,29 +898,31 @@ class RTPStatisticsCollector:
                         'threshold': self.alert_thresholds['quality_score'],
                         'timestamp': timezone.now().isoformat()
                     })
-                
+
                 # Store alerts
                 if alerts:
                     self.active_alerts[session_id] = alerts
                     logger.warning(f"Quality alerts for session {session_id}: {len(alerts)} issues detected")
                 else:
                     self.active_alerts.pop(session_id, None)
-                    
+
         except Exception as e:
             logger.error(f"Error checking system alerts: {e}")
-    
+
     def get_system_report(self) -> Dict[str, Any]:
         """Generate comprehensive system statistics report"""
         uptime = (timezone.now() - self.global_stats['system_start_time']).total_seconds()
-        
+
         # Calculate per-session averages
         if self.quality_monitors:
-            avg_packet_loss = sum(m.get_packet_loss_rate() for m in self.quality_monitors.values()) / len(self.quality_monitors)
-            avg_jitter = sum(m.get_jitter_stats()['average_jitter_ms'] for m in self.quality_monitors.values()) / len(self.quality_monitors)
+            avg_packet_loss = sum(m.get_packet_loss_rate() for m in self.quality_monitors.values()) / len(
+                self.quality_monitors)
+            avg_jitter = sum(m.get_jitter_stats()['average_jitter_ms'] for m in self.quality_monitors.values()) / len(
+                self.quality_monitors)
         else:
             avg_packet_loss = 0.0
             avg_jitter = 0.0
-        
+
         return {
             'timestamp': timezone.now().isoformat(),
             'system_uptime_seconds': uptime,
@@ -764,26 +937,26 @@ class RTPStatisticsCollector:
             'active_alerts_count': len(self.active_alerts),
             'sessions_with_alerts': list(self.active_alerts.keys())
         }
-    
+
     def get_session_report(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed report for specific session"""
         monitor = self.quality_monitors.get(session_id)
         if not monitor:
             return None
-        
+
         report = monitor.get_quality_report()
-        
+
         # Add alert information
         alerts = self.active_alerts.get(session_id, [])
         report['active_alerts'] = alerts
         report['alert_count'] = len(alerts)
-        
+
         return report
 
 
 class AudioCodec:
     """Audio codec definitions and conversion utilities"""
-    
+
     CODECS = {
         'ulaw': {'payload_type': 0, 'sample_rate': 8000, 'channels': 1},
         'alaw': {'payload_type': 8, 'sample_rate': 8000, 'channels': 1},
@@ -791,7 +964,7 @@ class AudioCodec:
         'g722': {'payload_type': 9, 'sample_rate': 16000, 'channels': 1},
         'l16': {'payload_type': 10, 'sample_rate': 44100, 'channels': 2},
     }
-    
+
     @classmethod
     def get_codec_info(cls, payload_type: int) -> Optional[Dict[str, Any]]:
         """Get codec information by payload type"""
@@ -799,7 +972,7 @@ class AudioCodec:
             if info['payload_type'] == payload_type:
                 return {'name': codec_name, **info}
         return None
-    
+
     @classmethod
     def validate_codec(cls, codec_name: str) -> bool:
         """Validate if codec is supported"""
@@ -808,18 +981,18 @@ class AudioCodec:
 
 class RTPServerProtocol(asyncio.DatagramProtocol):
     """UDP protocol handler for RTP packets"""
-    
+
     def __init__(self, rtp_server):
         self.rtp_server = rtp_server
         self.transport = None
-    
+
     def connection_made(self, transport):
         """Called when UDP socket is ready"""
         self.transport = transport
         sock = transport.get_extra_info('socket')
         if sock:
             logger.info(f"RTP server listening on {sock.getsockname()}")
-    
+
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         """Handle incoming RTP packets"""
         try:
@@ -830,37 +1003,37 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 asyncio.create_task(self.rtp_server._process_rtp_packet(packet))
         except Exception as e:
             logger.error(f"Error processing RTP packet from {addr}: {e}")
-    
+
     def _parse_rtp_packet(self, data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
         """Parse raw UDP data into RTP packet structure"""
         try:
             if len(data) < 12:  # Minimum RTP header size
                 logger.warning(f"RTP packet too small from {addr}: {len(data)} bytes")
                 return None
-            
+
             # Parse fixed header (12 bytes)
             header_data = struct.unpack('!BBHII', data[:12])
-            
+
             # Extract header fields
             version_flags = header_data[0]
             version = (version_flags >> 6) & 0x3
             padding = bool((version_flags >> 5) & 0x1)
             extension = bool((version_flags >> 4) & 0x1)
             csrc_count = version_flags & 0xF
-            
+
             marker_pt = header_data[1]
             marker = bool((marker_pt >> 7) & 0x1)
             payload_type = marker_pt & 0x7F
-            
+
             sequence_number = header_data[2]
             timestamp = header_data[3]
             ssrc = header_data[4]
-            
+
             # Validate RTP version
             if version != 2:
                 logger.warning(f"Invalid RTP version {version} from {addr}")
                 return None
-            
+
             # Parse CSRC list if present
             header_size = 12
             csrc_list = []
@@ -869,26 +1042,26 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 if len(data) < csrc_end:
                     logger.warning(f"Invalid CSRC count {csrc_count} from {addr}")
                     return None
-                
+
                 for i in range(csrc_count):
                     csrc_start = 12 + (i * 4)
                     csrc = struct.unpack('!I', data[csrc_start:csrc_start + 4])[0]
                     csrc_list.append(csrc)
                 header_size = csrc_end
-            
+
             # Handle extension header if present
             if extension:
                 if len(data) < header_size + 4:
                     logger.warning(f"Invalid extension header from {addr}")
                     return None
-                
+
                 ext_header = struct.unpack('!HH', data[header_size:header_size + 4])
                 ext_length = ext_header[1] * 4
                 header_size += 4 + ext_length
-            
+
             # Extract payload
             payload = data[header_size:]
-            
+
             # Create RTP header object
             header = RTPHeader(
                 version=version,
@@ -902,7 +1075,7 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 ssrc=ssrc,
                 csrc_list=csrc_list
             )
-            
+
             # Create RTP packet object
             packet = RTPPacket(
                 header=header,
@@ -911,9 +1084,9 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 source_address=addr,
                 size=len(data)
             )
-            
+
             return packet
-            
+
         except Exception as e:
             logger.error(f"Error parsing RTP packet from {addr}: {e}")
             return None
@@ -930,7 +1103,7 @@ class RTPServer:
     - Codec support and conversion
     - Performance monitoring
     """
-    
+
     def __init__(self):
         self.endpoints: Dict[int, RTPEndpoint] = {}  # port -> endpoint
         self.session_endpoints: Dict[str, RTPEndpoint] = {}  # session_id -> endpoint
@@ -945,10 +1118,10 @@ class RTPServer:
         }
         self._lock = asyncio.Lock()
         logger.info("RTP Server initialized")
-    
-    async def create_endpoint(self, session_id: str, tenant_id: str, 
-                            remote_host: str, remote_port: int, 
-                            codec: str = "ulaw") -> Optional[RTPEndpoint]:
+
+    async def create_endpoint(self, session_id: str, tenant_id: str,
+                              remote_host: str, remote_port: int,
+                              codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint for a session"""
         try:
             async with self._lock:
@@ -956,13 +1129,13 @@ class RTPServer:
                 if not AudioCodec.validate_codec(codec):
                     logger.error(f"Unsupported codec: {codec}")
                     return None
-                
+
                 # Get available port for tenant
                 local_port = await self._get_available_port(tenant_id)
                 if not local_port:
                     logger.error(f"No available ports for tenant {tenant_id}")
                     return None
-                
+
                 # Create endpoint
                 endpoint = RTPEndpoint(
                     session_id=session_id,
@@ -972,25 +1145,25 @@ class RTPServer:
                     remote_port=remote_port,
                     codec=codec
                 )
-                
+
                 # Start UDP server for this endpoint
                 success = await self._start_server_for_port(local_port)
                 if not success:
                     logger.error(f"Failed to start server on port {local_port}")
                     return None
-                
+
                 # Register endpoint
                 self.endpoints[local_port] = endpoint
                 self.session_endpoints[session_id] = endpoint
                 self.statistics['active_endpoints'] += 1
-                
+
                 logger.info(f"Created RTP endpoint for session {session_id} on port {local_port}")
                 return endpoint
-                
+
         except Exception as e:
             logger.error(f"Error creating RTP endpoint: {e}")
             return None
-    
+
     async def _get_available_port(self, tenant_id: str) -> Optional[int]:
         """Get an available port within tenant's range"""
         try:
@@ -998,7 +1171,7 @@ class RTPServer:
             tenant = await Tenant.objects.aget(id=tenant_id)
             port_start = tenant.rtp_port_range_start
             port_end = tenant.rtp_port_range_end
-            
+
             # Find available port
             for port in range(port_start, port_end + 1):
                 if port not in self.endpoints and port not in self.servers:
@@ -1010,83 +1183,83 @@ class RTPServer:
                         return port
                     except OSError:
                         continue  # Port in use
-            
+
             logger.warning(f"No available ports in range {port_start}-{port_end} for tenant {tenant_id}")
             return None
-            
+
         except Exception as e:
             logger.error(f"Error finding available port for tenant {tenant_id}: {e}")
             return None
-    
+
     async def _start_server_for_port(self, port: int) -> bool:
         """Start UDP server for specific port"""
         try:
             loop = asyncio.get_event_loop()
-            
+
             # Create protocol and transport
             protocol = RTPServerProtocol(self)
             transport, _ = await loop.create_datagram_endpoint(
                 lambda: protocol,
                 local_addr=('0.0.0.0', port)
             )
-            
+
             # Store server reference
             self.servers[port] = (transport, protocol)
-            
+
             logger.info(f"Started RTP server on port {port}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error starting RTP server on port {port}: {e}")
             return False
-    
+
     async def _process_rtp_packet(self, packet: RTPPacket):
         """Process incoming RTP packet"""
         try:
             # Find endpoint by source port (assuming standard port mapping)
             endpoint = None
             source_port = packet.source_address[1]
-            
+
             # Try to find endpoint by matching remote address
             for ep in self.endpoints.values():
-                if (ep.remote_host == packet.source_address[0] or 
-                    ep.remote_port == source_port):
+                if (ep.remote_host == packet.source_address[0] or
+                        ep.remote_port == source_port):
                     endpoint = ep
                     break
-            
+
             if not endpoint:
                 logger.debug(f"No endpoint found for packet from {packet.source_address}")
                 return
-            
+
             # Update endpoint statistics
             endpoint.packet_count += 1
             endpoint.byte_count += packet.size
             endpoint.last_packet_time = packet.received_time
-            
+
             # Update global statistics
             self.statistics['total_packets'] += 1
             self.statistics['total_bytes'] += packet.size
-            
+
             # Validate codec
             codec_info = AudioCodec.get_codec_info(packet.header.payload_type)
             if not codec_info:
                 logger.warning(f"Unknown codec payload type: {packet.header.payload_type}")
                 return
-            
+
             # Call registered packet handlers
             for handler in self.packet_handlers:
                 try:
                     await handler(packet, endpoint)
                 except Exception as e:
                     logger.error(f"Error in packet handler: {e}")
-            
+
             logger.debug(f"Processed RTP packet: session={endpoint.session_id}, "
-                        f"seq={packet.header.sequence_number}, "
-                        f"payload={len(packet.payload)} bytes")
-            
+                         f"seq={packet.header.sequence_number}, "
+                         f"payload={len(packet.payload)} bytes")
+
         except Exception as e:
             logger.error(f"Error processing RTP packet: {e}")
-    
+
     async def remove_endpoint(self, session_id: str):
         """Remove RTP endpoint and cleanup resources"""
         try:
@@ -1095,33 +1268,33 @@ class RTPServer:
                 if not endpoint:
                     logger.warning(f"No endpoint found for session {session_id}")
                     return
-                
+
                 port = endpoint.local_port
-                
+
                 # Stop server for this port
                 if port in self.servers:
                     transport, protocol = self.servers[port]
                     transport.close()
                     del self.servers[port]
-                
+
                 # Remove endpoint references
                 if port in self.endpoints:
                     del self.endpoints[port]
                 if session_id in self.session_endpoints:
                     del self.session_endpoints[session_id]
-                
+
                 self.statistics['active_endpoints'] -= 1
-                
+
                 logger.info(f"Removed RTP endpoint for session {session_id} on port {port}")
-                
+
         except Exception as e:
             logger.error(f"Error removing RTP endpoint: {e}")
-    
+
     def register_packet_handler(self, handler: Callable[[RTPPacket, RTPEndpoint], None]):
         """Register a handler for processed RTP packets"""
         self.packet_handlers.append(handler)
         logger.info(f"Registered RTP packet handler: {handler.__name__}")
-    
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get server statistics"""
         stats = self.statistics.copy()
@@ -1130,17 +1303,17 @@ class RTPServer:
             uptime = (timezone.now() - stats['server_start_time']).total_seconds()
             stats['uptime_seconds'] = uptime
         return stats
-    
+
     async def start(self):
         """Start the RTP server"""
         try:
             self.statistics['server_start_time'] = timezone.now()
             logger.info("RTP Server started successfully")
-            
+
         except Exception as e:
             logger.error(f"Error starting RTP server: {e}")
             raise
-    
+
     async def stop(self):
         """Stop the RTP server and cleanup all resources"""
         try:
@@ -1148,15 +1321,15 @@ class RTPServer:
                 # Close all servers
                 for port, (transport, protocol) in self.servers.items():
                     transport.close()
-                
+
                 # Clear all data
                 self.servers.clear()
                 self.endpoints.clear()
                 self.session_endpoints.clear()
                 self.packet_handlers.clear()
-                
+
                 logger.info("RTP Server stopped")
-                
+
         except Exception as e:
             logger.error(f"Error stopping RTP server: {e}")
 
@@ -1183,7 +1356,7 @@ class RTPSessionEndpointManager:
     - Dynamic port allocation and cleanup
     - Endpoint state synchronization
     """
-    
+
     def __init__(self, rtp_server: RTPServer):
         self.rtp_server = rtp_server
         self.endpoint_states: Dict[str, str] = {}  # session_id -> state
@@ -1191,29 +1364,29 @@ class RTPSessionEndpointManager:
         self.cleanup_task: Optional[asyncio.Task] = None
         self.health_check_task: Optional[asyncio.Task] = None
         self.session_manager = get_session_manager()
-        
+
         # Configuration
         self.endpoint_timeout = getattr(settings, 'RTP_ENDPOINT_TIMEOUT', 300)  # 5 minutes
         self.cleanup_interval = getattr(settings, 'RTP_CLEANUP_INTERVAL', 60)  # 1 minute
         self.health_check_interval = getattr(settings, 'RTP_HEALTH_CHECK_INTERVAL', 30)  # 30 seconds
-        
+
         logger.info("RTP Session Endpoint Manager initialized")
-    
+
     async def start(self):
         """Start endpoint management tasks"""
         try:
             # Start periodic cleanup task
             self.cleanup_task = asyncio.create_task(self._cleanup_loop())
-            
+
             # Start health check task
             self.health_check_task = asyncio.create_task(self._health_check_loop())
-            
+
             logger.info("RTP endpoint management tasks started")
-            
+
         except Exception as e:
             logger.error(f"Error starting RTP endpoint management: {e}")
             raise
-    
+
     async def stop(self):
         """Stop endpoint management tasks"""
         try:
@@ -1221,44 +1394,44 @@ class RTPSessionEndpointManager:
                 self.cleanup_task.cancel()
             if self.health_check_task:
                 self.health_check_task.cancel()
-            
+
             # Wait for tasks to complete
             tasks = [t for t in [self.cleanup_task, self.health_check_task] if t and not t.cancelled()]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             logger.info("RTP endpoint management stopped")
-            
+
         except Exception as e:
             logger.error(f"Error stopping RTP endpoint management: {e}")
-    
+
     async def create_session_endpoint(self, session_id: str, tenant_id: str,
-                                    remote_host: str, remote_port: int,
-                                    codec: str = "ulaw") -> Optional[RTPEndpoint]:
+                                      remote_host: str, remote_port: int,
+                                      codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint with full session management"""
         try:
             # Create endpoint through RTP server
             endpoint = await self.rtp_server.create_endpoint(
                 session_id, tenant_id, remote_host, remote_port, codec
             )
-            
+
             if endpoint:
                 # Set initial state
                 self.endpoint_states[session_id] = "created"
                 self.endpoint_timeouts[session_id] = timezone.now() + timedelta(seconds=self.endpoint_timeout)
-                
+
                 # Update session with endpoint information
                 await self._update_session_endpoint_info(session_id, endpoint)
-                
+
                 logger.info(f"Created session endpoint for {session_id} on port {endpoint.local_port}")
                 return endpoint
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error creating session endpoint: {e}")
             return None
-    
+
     async def activate_endpoint(self, session_id: str):
         """Activate an endpoint (mark as receiving traffic)"""
         try:
@@ -1267,10 +1440,10 @@ class RTPSessionEndpointManager:
                 # Extend timeout for active endpoints
                 self.endpoint_timeouts[session_id] = timezone.now() + timedelta(seconds=self.endpoint_timeout * 2)
                 logger.debug(f"Activated endpoint for session {session_id}")
-            
+
         except Exception as e:
             logger.error(f"Error activating endpoint for session {session_id}: {e}")
-    
+
     async def deactivate_endpoint(self, session_id: str):
         """Deactivate an endpoint (mark as idle)"""
         try:
@@ -1279,38 +1452,38 @@ class RTPSessionEndpointManager:
                 # Shorter timeout for idle endpoints
                 self.endpoint_timeouts[session_id] = timezone.now() + timedelta(seconds=60)
                 logger.debug(f"Deactivated endpoint for session {session_id}")
-            
+
         except Exception as e:
             logger.error(f"Error deactivating endpoint for session {session_id}: {e}")
-    
+
     async def destroy_session_endpoint(self, session_id: str):
         """Destroy a session endpoint and cleanup resources"""
         try:
             # Remove endpoint from RTP server
             await self.rtp_server.remove_endpoint(session_id)
-            
+
             # Clean up management state
             self.endpoint_states.pop(session_id, None)
             self.endpoint_timeouts.pop(session_id, None)
-            
+
             # Update session to remove endpoint info
             await self._clear_session_endpoint_info(session_id)
-            
+
             logger.info(f"Destroyed session endpoint for {session_id}")
-            
+
         except Exception as e:
             logger.error(f"Error destroying session endpoint: {e}")
-    
+
     async def get_endpoint_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get comprehensive endpoint information"""
         try:
             endpoint = self.rtp_server.session_endpoints.get(session_id)
             if not endpoint:
                 return None
-            
+
             state = self.endpoint_states.get(session_id, "unknown")
             timeout = self.endpoint_timeouts.get(session_id)
-            
+
             return {
                 'session_id': endpoint.session_id,
                 'tenant_id': endpoint.tenant_id,
@@ -1326,11 +1499,11 @@ class RTPSessionEndpointManager:
                 'byte_count': endpoint.byte_count,
                 'timeout_at': timeout.isoformat() if timeout else None
             }
-            
+
         except Exception as e:
             logger.error(f"Error getting endpoint info for session {session_id}: {e}")
             return None
-    
+
     async def list_active_endpoints(self) -> List[Dict[str, Any]]:
         """List all active endpoints with their information"""
         try:
@@ -1339,65 +1512,65 @@ class RTPSessionEndpointManager:
                 endpoint_info = await self.get_endpoint_info(session_id)
                 if endpoint_info:
                     active_endpoints.append(endpoint_info)
-            
+
             return active_endpoints
-            
+
         except Exception as e:
             logger.error(f"Error listing active endpoints: {e}")
             return []
-    
+
     async def _cleanup_loop(self):
         """Periodic cleanup of expired endpoints"""
         try:
             while True:
                 await asyncio.sleep(self.cleanup_interval)
-                
+
                 current_time = timezone.now()
                 expired_sessions = []
-                
+
                 # Find expired sessions
                 for session_id, timeout in self.endpoint_timeouts.items():
                     if current_time > timeout:
                         expired_sessions.append(session_id)
-                
+
                 # Clean up expired sessions
                 for session_id in expired_sessions:
                     logger.info(f"Cleaning up expired endpoint for session {session_id}")
                     await self.destroy_session_endpoint(session_id)
-                
+
                 if expired_sessions:
                     logger.info(f"Cleaned up {len(expired_sessions)} expired endpoints")
-                    
+
         except asyncio.CancelledError:
             logger.info("RTP endpoint cleanup loop cancelled")
         except Exception as e:
             logger.error(f"Error in RTP endpoint cleanup loop: {e}")
-    
+
     async def _health_check_loop(self):
         """Periodic health check of endpoints"""
         try:
             while True:
                 await asyncio.sleep(self.health_check_interval)
-                
+
                 current_time = timezone.now()
-                
+
                 # Check endpoint health
                 for session_id, endpoint in self.rtp_server.session_endpoints.items():
                     # Check if endpoint is receiving traffic
                     if endpoint.last_packet_time:
                         idle_time = (current_time - endpoint.last_packet_time).total_seconds()
-                        
+
                         # Automatically activate/deactivate based on traffic
                         if idle_time < 30 and self.endpoint_states.get(session_id) != "active":
                             await self.activate_endpoint(session_id)
                         elif idle_time > 120 and self.endpoint_states.get(session_id) == "active":
                             await self.deactivate_endpoint(session_id)
-                    
+
         except asyncio.CancelledError:
             logger.info("RTP endpoint health check loop cancelled")
         except Exception as e:
             logger.error(f"Error in RTP endpoint health check loop: {e}")
-    
+
     async def _update_session_endpoint_info(self, session_id: str, endpoint: RTPEndpoint):
         """Update session with endpoint information"""
         try:
@@ -1405,7 +1578,7 @@ class RTPSessionEndpointManager:
             if session:
                 session.rtp_endpoint_host = "localhost"  # Or actual host
                 session.rtp_endpoint_port = endpoint.local_port
-                session.session_metadata.update({
+                session.metadata.update({
                     'rtp_endpoint': {
                         'local_port': endpoint.local_port,
                         'remote_host': endpoint.remote_host,
@@ -1414,10 +1587,10 @@ class RTPSessionEndpointManager:
                     }
                 })
                 await self.session_manager.update_session(session_id, session)
-                
+
         except Exception as e:
             logger.error(f"Error updating session endpoint info: {e}")
-    
+
     async def _clear_session_endpoint_info(self, session_id: str):
         """Clear endpoint information from session"""
         try:
@@ -1425,9 +1598,9 @@ class RTPSessionEndpointManager:
             if session:
                 session.rtp_endpoint_host = None
                 session.rtp_endpoint_port = None
-                session.session_metadata.pop('rtp_endpoint', None)
+                session.metadata.pop('rtp_endpoint', None)
                 await self.session_manager.update_session(session_id, session)
-                
+
         except Exception as e:
             logger.error(f"Error clearing session endpoint info: {e}")
 

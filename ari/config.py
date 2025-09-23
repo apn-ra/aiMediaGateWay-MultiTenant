@@ -211,3 +211,15 @@ class ARIConfig(BaseModel):
             "sock_connect": min(self.timeout / 3, 10.0),
         }
 
+    def get_websocket_kwargs(self) -> Dict[str, Any]:
+        """Get WebSocket configuration arguments.
+
+        Returns:
+            Dictionary of WebSocket arguments
+        """
+        return {
+            "heartbeat": self.websocket_ping_interval,
+            "timeout": self.websocket_pong_timeout,
+            "max_msg_size": self.websocket_max_size,
+            "compress": 15,  # Enable compression
+        }

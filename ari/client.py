@@ -12,7 +12,6 @@ from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Callable
 from types import TracebackType
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout, TCPConnector
-from twisted.web.test.test_newclient import assertWrapperExceptionTypes
 
 from ari.config import ARIConfig
 from ari.exceptions import (
@@ -474,7 +473,7 @@ class ARIClient:
             raise ConnectionError("HTTP client must be connected before WebSocket")
 
         try:
-            ws_url = f"{self.config.websocket_url}/events?app={self.config.app_name}"
+            ws_url = f"{self.config.websocket_url}?app={self.config.app_name}"
             logger.info(f"Connecting to WebSocket at {ws_url}")
 
             # Create WebSocket connection with authentication
@@ -495,8 +494,8 @@ class ARIClient:
                 self._websocket_task = asyncio.create_task(self._websocket_event_loop())
 
             # Start ping/pong heartbeat task
-            if self._websocket_ping_task is None or self._websocket_ping_task.done():
-                self._websocket_ping_task = asyncio.create_task(self._websocket_ping_loop())
+            # if self._websocket_ping_task is None or self._websocket_ping_task.done():
+            #     self._websocket_ping_task = asyncio.create_task(self._websocket_ping_loop())
 
             # Process buffered events if any
             await self._process_buffered_events()
@@ -568,14 +567,14 @@ class ARIClient:
                     try:
                         # Send ping
                         await self._websocket.ping()
-                        logger.debug("Sent WebSocket ping")
+                        logger.info("--- Sent WebSocket Ping ---")
 
                         # Check if we received pong within timeout
                         await asyncio.sleep(1.0)  # Small delay to allow pong response
                         current_time = asyncio.get_event_loop().time()
 
                         if (self._last_pong_time and
-                                current_time - self._last_pong_time > self.config.websocket_pong_timeout):
+                                (current_time - self._last_pong_time) > self.config.websocket_pong_timeout):
                             logger.warning("WebSocket pong timeout - connection may be unhealthy")
                             # Don't break here, let the main loop handle reconnection
 
@@ -1106,6 +1105,10 @@ class ARIClient:
             params["formats"] = formats
 
         return await self.post("/channels", params=params)
+
+    async def continue_to_dialplan(self, channel_id: str) -> Dict[str, Any]:
+        """Continue to dialplan for a specific channel."""
+        return await self.post(f"/channels/{channel_id}/continue")
 
     async def create_external_media(
             self,

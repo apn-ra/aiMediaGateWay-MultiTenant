@@ -17,7 +17,7 @@ from enum import Enum
 from datetime import datetime
 from django.utils import timezone
 
-from core.ami.ami_manager import get_ami_manager
+from core.junie_codes.ami.ami_manager import get_ami_manager
 
 
 logger = logging.getLogger(__name__)
