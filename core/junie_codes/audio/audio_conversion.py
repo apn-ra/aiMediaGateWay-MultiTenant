@@ -185,6 +185,7 @@ class AudioFormat(Enum):
     GSM = "gsm"
     G722 = "g722"
     G729 = "g729"
+    SLIN16 = "slin16"
     WAV = "wav"
     RAW = "raw"
 
@@ -768,6 +769,14 @@ def get_codec_info(format_name: str) -> Optional[Dict[str, Any]]:
             'sample_rate': 16000,
             'bit_depth': 16,
             'compression': 'lossy',
+            'quality': 'wideband'
+        },
+        'slin16': {
+            'name': 'SLIN16',
+            'description': 'Signed Linear 16-bit PCM at 16kHz',
+            'sample_rate': 16000,
+            'bit_depth': 16,
+            'compression': 'none',
             'quality': 'wideband'
         }
     }

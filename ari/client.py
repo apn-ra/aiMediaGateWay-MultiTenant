@@ -8,11 +8,13 @@ import asyncio
 import json
 import logging
 import random
-from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Callable
+from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Callable, Coroutine
 from types import TracebackType
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout, TCPConnector
 
+from ari import BridgeResource, ChannelResource
+from ari.resources import BridgeResource, ChannelResource
 from ari.config import ARIConfig
 from ari.exceptions import (
     ARIError,
@@ -1121,7 +1123,7 @@ class ARIClient:
             channel_id: Optional[str] = None,
             originating: Optional[bool] = False,
             variables: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ChannelResource:
         """
         Creates an external media channel by interacting with an external system using
         HTTP POST. This method allows specifying various parameters to configure the
@@ -1147,7 +1149,7 @@ class ARIClient:
         params = {
             "app": app or self.config.app_name,
             "external_host": external_host or f"{self.config.external_media_host}:{self.config.external_media_port}",
-            "codec": codec,
+            "format": codec,
             "transport": transport,
             "direction": direction,
             "connection_type": connection_type,
@@ -1159,7 +1161,8 @@ class ARIClient:
         if variables:
             params["variables"] = variables
 
-        return await self.post("/channels/externalMedia", params=params)
+        external = await self.post("/channels/externalMedia", params=params)
+        return ChannelResource(self, external)
 
     async def answer_channel(self, channel_id: str) -> None:
         """Answer a channel.
@@ -1221,7 +1224,7 @@ class ARIClient:
             bridge_type: str = "mixing",
             bridge_id: Optional[str] = None,
             name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> BridgeResource:
         """Create a new bridge.
 
         Args:
@@ -1238,4 +1241,5 @@ class ARIClient:
         if name:
             params["name"] = name
 
-        return await self.post("/bridges", params=params)
+        bridge = await self.post("/bridges", params=params)
+        return BridgeResource(self, bridge)

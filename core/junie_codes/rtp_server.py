@@ -301,6 +301,8 @@ class AudioProcessor:
                 converted_payload = self._ulaw2lin(payload)
             elif source_codec == 'alaw':
                 converted_payload = self._alaw2lin(payload)
+            elif source_codec == 'slin16':
+                converted_payload = self._slin16_to_lin(payload)
             elif source_codec == 'gsm':
                 # GSM conversion would need external library
                 logger.warning("GSM codec conversion not implemented")
@@ -311,6 +313,8 @@ class AudioProcessor:
                 converted_payload = self._lin2ulaw(converted_payload)
             elif target_codec == 'alaw' and source_codec != 'alaw':
                 converted_payload = self._lin2alaw(converted_payload)
+            elif target_codec == 'slin16' and source_codec != 'slin16':
+                converted_payload = self._lin_to_slin16(converted_payload)
 
             # Cache result for performance (limit cache size)
             if len(self.conversion_cache) < 100:
@@ -478,6 +482,38 @@ class AudioProcessor:
 
         except Exception as e:
             logger.error(f"Error in lin2alaw conversion: {e}")
+            return payload
+
+    def _slin16_to_lin(self, payload: bytes) -> bytes:
+        """Convert SLIN16 (16kHz, 16-bit) to linear PCM (8kHz, 16-bit) using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            slin16_data = np.frombuffer(payload, dtype=np.int16)
+            
+            # Downsample from 16kHz to 8kHz by taking every second sample
+            # This is a simple decimation - more sophisticated filtering could be added
+            downsampled_data = slin16_data[::2]
+            
+            return downsampled_data.astype(np.int16).tobytes()
+            
+        except Exception as e:
+            logger.error(f"Error in slin16_to_lin conversion: {e}")
+            return payload
+
+    def _lin_to_slin16(self, payload: bytes) -> bytes:
+        """Convert linear PCM (8kHz, 16-bit) to SLIN16 (16kHz, 16-bit) using numpy"""
+        try:
+            # Convert bytes to numpy array of int16
+            linear_data = np.frombuffer(payload, dtype=np.int16)
+            
+            # Upsample from 8kHz to 16kHz by duplicating each sample
+            # This is simple sample and hold - more sophisticated interpolation could be added
+            upsampled_data = np.repeat(linear_data, 2)
+            
+            return upsampled_data.astype(np.int16).tobytes()
+            
+        except Exception as e:
+            logger.error(f"Error in lin_to_slin16 conversion: {e}")
             return payload
 
     def _calculate_rms(self, payload: bytes) -> float:
@@ -963,6 +999,7 @@ class AudioCodec:
         'gsm': {'payload_type': 3, 'sample_rate': 8000, 'channels': 1},
         'g722': {'payload_type': 9, 'sample_rate': 16000, 'channels': 1},
         'l16': {'payload_type': 10, 'sample_rate': 44100, 'channels': 2},
+        'slin16': {'payload_type': 11, 'sample_rate': 16000, 'channels': 1},
     }
 
     @classmethod

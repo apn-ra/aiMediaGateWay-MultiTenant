@@ -85,6 +85,20 @@ class ARIEventHandler:
             if status:
                 session = await self.session_manager.get_session(session_id)
                 logger.info(f"ExternalMedia Host: {session.rtp_endpoint_host} Port: {session.rtp_endpoint_port}")
+                bridge = await client.create_bridge(bridge_type="mixing")
+                external = await client.create_external_media(
+                    app=client.config.app_name,
+                    external_host=f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}",
+                    codec="slin16",
+                    transport="udp",
+                    direction="send",
+                    connection_type="client",
+                )
+
+                await bridge.add_channel(channel_id)
+                await bridge.add_channel(external.id)
+                self._event_statistics['bridge'] += 1
+                logger.info(f"ExternalMedia connected: {external.id}")
 
             # Another slight delay
             await asyncio.sleep(0.1)
