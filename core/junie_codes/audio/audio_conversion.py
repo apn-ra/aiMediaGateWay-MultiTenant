@@ -22,20 +22,159 @@ Features:
 - Audio quality metrics
 - Batch processing capabilities
 - Caching for performance optimization
+
+Implementation:
+- Uses numpy for efficient audio data processing and codec conversions
+- Uses scipy.signal for high-quality audio resampling
+- Replaces deprecated audioop module with modern numpy-based implementations
 """
 
-import audioop
 import logging
 import struct
 import wave
 import io
+import numpy as np
 from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 import math
+from scipy import signal
 
 logger = logging.getLogger(__name__)
+
+
+# Audio conversion utility functions using numpy
+def _ulaw_to_linear(ulaw_data: bytes) -> bytes:
+    """Convert μ-law data to 16-bit linear PCM using numpy"""
+    try:
+        # Convert bytes to numpy array
+        ulaw_array = np.frombuffer(ulaw_data, dtype=np.uint8)
+        
+        # μ-law decompression algorithm
+        ulaw_array = ulaw_array.astype(np.int16)
+        sign = (ulaw_array & 0x80) >> 7
+        exponent = (ulaw_array & 0x70) >> 4
+        mantissa = ulaw_array & 0x0F
+        
+        # Calculate linear value
+        linear = (mantissa << (exponent + 3)) + (0x84 << exponent) - 0x84
+        linear = np.where(sign == 1, -linear, linear)
+        
+        return linear.astype(np.int16).tobytes()
+    except Exception as e:
+        logger.error(f"Error in μ-law to linear conversion: {e}")
+        return ulaw_data
+
+
+def _alaw_to_linear(alaw_data: bytes) -> bytes:
+    """Convert A-law data to 16-bit linear PCM using numpy"""
+    try:
+        # Convert bytes to numpy array
+        alaw_array = np.frombuffer(alaw_data, dtype=np.uint8)
+        
+        # A-law decompression algorithm
+        alaw_array = alaw_array.astype(np.int16)
+        sign = (alaw_array & 0x80) >> 7
+        exponent = (alaw_array & 0x70) >> 4
+        mantissa = alaw_array & 0x0F
+        
+        # Calculate linear value
+        linear = np.where(exponent == 0,
+                         mantissa << 4,
+                         ((mantissa | 0x10) << (exponent + 3)) - 128)
+        linear = np.where(sign == 1, -linear, linear)
+        
+        return linear.astype(np.int16).tobytes()
+    except Exception as e:
+        logger.error(f"Error in A-law to linear conversion: {e}")
+        return alaw_data
+
+
+def _linear_to_ulaw(linear_data: bytes) -> bytes:
+    """Convert 16-bit linear PCM to μ-law using numpy"""
+    try:
+        # Convert bytes to numpy array
+        linear_array = np.frombuffer(linear_data, dtype=np.int16)
+        
+        # μ-law compression algorithm
+        sign = (linear_array < 0).astype(np.uint8)
+        linear_array = np.abs(linear_array)
+        
+        # Add bias and clip
+        linear_array = np.clip(linear_array + 0x84, 0, 0x7FFF)
+        
+        # Find exponent
+        exponent = np.zeros_like(linear_array, dtype=np.uint8)
+        for i in range(7, 0, -1):
+            mask = linear_array >= (1 << (i + 7))
+            exponent = np.where(mask & (exponent == 0), i, exponent)
+        
+        # Calculate mantissa
+        mantissa = (linear_array >> (exponent + 3)) & 0x0F
+        
+        # Combine sign, exponent, and mantissa
+        ulaw = (sign << 7) | (exponent << 4) | mantissa
+        ulaw = ulaw ^ 0xFF  # Invert bits as per μ-law standard
+        
+        return ulaw.astype(np.uint8).tobytes()
+    except Exception as e:
+        logger.error(f"Error in linear to μ-law conversion: {e}")
+        return linear_data
+
+
+def _linear_to_alaw(linear_data: bytes) -> bytes:
+    """Convert 16-bit linear PCM to A-law using numpy"""
+    try:
+        # Convert bytes to numpy array
+        linear_array = np.frombuffer(linear_data, dtype=np.int16)
+        
+        # A-law compression algorithm
+        sign = (linear_array < 0).astype(np.uint8)
+        linear_array = np.abs(linear_array)
+        
+        # Find exponent and mantissa
+        exponent = np.zeros_like(linear_array, dtype=np.uint8)
+        mantissa = np.zeros_like(linear_array, dtype=np.uint8)
+        
+        # Handle small values (exponent = 0)
+        small_mask = linear_array < 256
+        mantissa = np.where(small_mask, linear_array >> 4, mantissa)
+        
+        # Handle larger values
+        for i in range(1, 8):
+            range_mask = (linear_array >= (256 << (i - 1))) & (linear_array < (256 << i)) & ~small_mask
+            exponent = np.where(range_mask, i, exponent)
+            mantissa = np.where(range_mask, (linear_array >> (i + 3)) & 0x0F, mantissa)
+        
+        # Combine sign, exponent, and mantissa
+        alaw = (sign << 7) | (exponent << 4) | mantissa
+        alaw = alaw ^ 0x55  # Invert even bits as per A-law standard
+        
+        return alaw.astype(np.uint8).tobytes()
+    except Exception as e:
+        logger.error(f"Error in linear to A-law conversion: {e}")
+        return linear_data
+
+
+def _calculate_rms(data: bytes, sample_width: int) -> float:
+    """Calculate RMS level of audio data using numpy"""
+    try:
+        if sample_width == 1:
+            audio_array = np.frombuffer(data, dtype=np.int8).astype(np.float32)
+        elif sample_width == 2:
+            audio_array = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        elif sample_width == 4:
+            audio_array = np.frombuffer(data, dtype=np.int32).astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+        
+        # Calculate RMS
+        rms = np.sqrt(np.mean(audio_array ** 2))
+        return float(rms)
+    except Exception as e:
+        logger.error(f"Error calculating RMS: {e}")
+        return 0.0
 
 
 class AudioFormat(Enum):
@@ -291,9 +430,9 @@ class AudioConverter:
             if source_spec.format == AudioFormat.PCM_LINEAR:
                 return data
             elif source_spec.format == AudioFormat.ULAW:
-                return audioop.ulaw2lin(data, 2)
+                return _ulaw_to_linear(data)
             elif source_spec.format == AudioFormat.ALAW:
-                return audioop.alaw2lin(data, 2)
+                return _alaw_to_linear(data)
             elif source_spec.format == AudioFormat.WAV:
                 return self._extract_pcm_from_wav(data)
             elif source_spec.format == AudioFormat.GSM:
@@ -328,9 +467,9 @@ class AudioConverter:
             if target_spec.format == AudioFormat.PCM_LINEAR:
                 return pcm_data
             elif target_spec.format == AudioFormat.ULAW:
-                return audioop.lin2ulaw(pcm_data, 2)
+                return _linear_to_ulaw(pcm_data)
             elif target_spec.format == AudioFormat.ALAW:
-                return audioop.lin2alaw(pcm_data, 2)
+                return _linear_to_alaw(pcm_data)
             elif target_spec.format == AudioFormat.WAV:
                 return self._create_wav_data(pcm_data, target_spec)
             elif target_spec.format == AudioFormat.GSM:
@@ -366,8 +505,17 @@ class AudioConverter:
     def _resample_audio(self, data: bytes, source_rate: int, target_rate: int) -> bytes:
         """Resample audio data to different sample rate"""
         try:
-            # Simple linear resampling using audioop
-            return audioop.ratecv(data, 2, 1, source_rate, target_rate, None)[0]
+            # Convert bytes to numpy array (assuming 16-bit samples)
+            audio_array = np.frombuffer(data, dtype=np.int16)
+            
+            # Calculate new length based on rate ratio
+            new_length = int(len(audio_array) * target_rate / source_rate)
+            
+            # Resample using scipy
+            resampled = signal.resample(audio_array, new_length)
+            
+            # Convert back to bytes
+            return resampled.astype(np.int16).tobytes()
         except Exception as e:
             logger.error(f"Error resampling audio: {e}")
             return data
@@ -379,11 +527,17 @@ class AudioConverter:
                 return data
             
             if source_depth == 16 and target_depth == 8:
-                # 16-bit to 8-bit
-                return audioop.lin2lin(data, 2, 1)
+                # 16-bit to 8-bit: convert and scale down
+                audio_array = np.frombuffer(data, dtype=np.int16)
+                # Scale from 16-bit range to 8-bit range and convert
+                scaled = (audio_array / 256).astype(np.int8)
+                return scaled.tobytes()
             elif source_depth == 8 and target_depth == 16:
-                # 8-bit to 16-bit
-                return audioop.lin2lin(data, 1, 2)
+                # 8-bit to 16-bit: convert and scale up
+                audio_array = np.frombuffer(data, dtype=np.int8)
+                # Scale from 8-bit range to 16-bit range
+                scaled = (audio_array.astype(np.int16) * 256)
+                return scaled.tobytes()
             else:
                 # For other conversions, use linear scaling
                 logger.warning(f"Bit depth conversion {source_depth}→{target_depth} using linear scaling")
@@ -440,11 +594,11 @@ class AudioConverter:
             # Calculate signal quality metrics if both are PCM-like
             if source_spec.format in [AudioFormat.PCM_LINEAR] and len(source_data) > 0:
                 try:
-                    source_rms = audioop.rms(source_data, 2)
+                    source_rms = _calculate_rms(source_data, 2)
                     metrics['source_rms_level'] = source_rms
                     
                     if target_spec.format in [AudioFormat.PCM_LINEAR] and len(target_data) > 0:
-                        target_rms = audioop.rms(target_data, 2)
+                        target_rms = _calculate_rms(target_data, 2)
                         metrics['target_rms_level'] = target_rms
                         metrics['rms_ratio'] = target_rms / source_rms if source_rms > 0 else 0
                         

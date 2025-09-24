@@ -32,7 +32,7 @@ from django.utils import timezone
 from django.conf import settings
 
 # Import our components
-from core.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
+from core.junie_codes.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
 from core.junie_codes.rtp_server import AudioFrame
 from core.models import CallSession, Tenant, AudioRecording
 

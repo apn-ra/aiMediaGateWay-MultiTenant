@@ -6,7 +6,7 @@ import logging
 import asyncio
 from core.models import Tenant, CallSession
 from core.ami.client import AMIConnection
-from core.session.session_manager import CallSessionData, get_session_manager
+from core.junie_codes.session.session_manager import CallSessionData, get_session_manager
 from core.ami.client import get_ami_manager
 from typing import Dict, Any, Optional
 from django.utils import timezone
@@ -454,7 +454,7 @@ class AMIEventHandler:
             tenant = await asyncio.to_thread(
                 lambda: Tenant.objects.filter(is_active=True).first()
             )
-            return str(tenant.id) if tenant else None
+            return int(tenant.id) if tenant else None
         except Exception as e:
             logger.error(f"Error getting default tenant: {e}")
             return None

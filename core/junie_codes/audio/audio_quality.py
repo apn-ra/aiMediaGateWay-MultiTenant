@@ -16,9 +16,10 @@ Features:
 
 import asyncio
 import logging
-import audioop
 import math
 import struct
+import numpy as np
+import soundfile as sf
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,6 +30,96 @@ from django.utils import timezone
 from core.junie_codes.rtp_server import AudioFrame
 
 logger = logging.getLogger(__name__)
+
+
+# Audio codec conversion functions using numpy
+def ulaw_to_linear(ulaw_data: bytes, sample_width: int = 2) -> bytes:
+    """Convert μ-law encoded audio to linear PCM using numpy"""
+    try:
+        # Convert bytes to numpy array
+        ulaw_samples = np.frombuffer(ulaw_data, dtype=np.uint8)
+        
+        # μ-law decompression algorithm
+        ulaw_samples = ulaw_samples.astype(np.int16)
+        sign = (ulaw_samples & 0x80) >> 7
+        magnitude = ulaw_samples & 0x7F
+        
+        # Invert sign bit for processing
+        magnitude = magnitude ^ 0x55
+        
+        # Extract exponent and mantissa
+        exponent = (magnitude >> 4) & 0x07
+        mantissa = magnitude & 0x0F
+        
+        # Calculate linear value
+        linear = ((mantissa << 3) + 132) << exponent
+        linear = np.where(sign == 0, linear, -linear)
+        
+        # Convert to 16-bit signed integers
+        linear = np.clip(linear, -32768, 32767).astype(np.int16)
+        
+        return linear.tobytes()
+    except Exception as e:
+        logger.error(f"Error converting μ-law to linear: {e}")
+        return ulaw_data
+
+
+def alaw_to_linear(alaw_data: bytes, sample_width: int = 2) -> bytes:
+    """Convert A-law encoded audio to linear PCM using numpy"""
+    try:
+        # Convert bytes to numpy array
+        alaw_samples = np.frombuffer(alaw_data, dtype=np.uint8)
+        
+        # A-law decompression algorithm
+        alaw_samples = alaw_samples.astype(np.int16)
+        sign = (alaw_samples & 0x80) >> 7
+        magnitude = alaw_samples & 0x7F
+        
+        # Invert even bits
+        magnitude = magnitude ^ 0x55
+        
+        # Extract exponent and mantissa
+        exponent = (magnitude >> 4) & 0x07
+        mantissa = magnitude & 0x0F
+        
+        # Calculate linear value
+        if exponent == 0:
+            linear = (mantissa << 4) + 8
+        else:
+            linear = ((mantissa + 16) << (exponent + 3))
+        
+        linear = np.where(sign == 0, linear, -linear)
+        
+        # Convert to 16-bit signed integers
+        linear = np.clip(linear, -32768, 32767).astype(np.int16)
+        
+        return linear.tobytes()
+    except Exception as e:
+        logger.error(f"Error converting A-law to linear: {e}")
+        return alaw_data
+
+
+def calculate_rms(audio_data: bytes, sample_width: int = 2) -> float:
+    """Calculate RMS (Root Mean Square) of audio data using numpy"""
+    try:
+        if len(audio_data) == 0:
+            return 0.0
+        
+        # Convert bytes to numpy array based on sample width
+        if sample_width == 1:
+            samples = np.frombuffer(audio_data, dtype=np.uint8).astype(np.float32) - 128
+        elif sample_width == 2:
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+        else:
+            # Default to 16-bit
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+        
+        # Calculate RMS
+        rms = np.sqrt(np.mean(samples ** 2))
+        return float(rms)
+    except Exception as e:
+        logger.error(f"Error calculating RMS: {e}")
+        return 0.0
 
 
 class QualityLevel(Enum):
@@ -165,12 +256,12 @@ class AudioQualityAnalyzer:
             
             # Convert to linear PCM if needed
             if frames[0].codec == 'ulaw':
-                audio_data = audioop.ulaw2lin(audio_data, 2)
+                audio_data = ulaw_to_linear(audio_data, 2)
             elif frames[0].codec == 'alaw':
-                audio_data = audioop.alaw2lin(audio_data, 2)
+                audio_data = alaw_to_linear(audio_data, 2)
             
             # Calculate RMS of entire signal
-            signal_rms = audioop.rms(audio_data, 2)
+            signal_rms = calculate_rms(audio_data, 2)
             
             if signal_rms == 0:
                 return 0.0
@@ -297,7 +388,7 @@ class AudioQualityAnalyzer:
             
             # Convert to linear PCM if needed
             if frames[0].codec == 'ulaw':
-                audio_data = audioop.ulaw2lin(audio_data, 2)
+                audio_data = ulaw_to_linear(audio_data, 2)
             
             # Calculate simple distortion metric based on clipping
             samples = struct.unpack(f'{len(audio_data)//2}h', audio_data)

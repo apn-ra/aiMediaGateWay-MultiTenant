@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from django.utils import timezone
 from channels.layers import get_channel_layer
 
-from core.session.session_manager import SessionManager, CallSessionData, get_session_manager
+from core.junie_codes.session.session_manager import SessionManager, CallSessionData, get_session_manager
 from core.models import CallSession, Tenant
 
 

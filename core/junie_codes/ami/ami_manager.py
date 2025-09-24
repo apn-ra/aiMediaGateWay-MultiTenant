@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from django.utils import timezone
 import panoramisk
-from core.models import Tenant, SystemConfiguration
-from core.session.session_manager import SessionManager, get_session_manager
+from core.models import Tenant
+from core.junie_codes.session.session_manager import SessionManager, get_session_manager
 
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ class AMIConnection:
                 
             if self.manager:
                 try:
-                    await self.manager.close()
+                    self.manager.close()
                 except Exception as e:
                     logger.warning(f"Error closing AMI connection for tenant {self.tenant_id}: {e}")
                 finally:

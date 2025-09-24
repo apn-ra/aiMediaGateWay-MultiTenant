@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from django.utils import timezone
 
-from core.session.session_manager import get_session_manager, CallSessionData
-from core.ari.ari_manager import get_ari_manager
+from core.junie_codes.session.session_manager import get_session_manager, CallSessionData
+from core.junie_codes.ari.ari_manager import get_ari_manager
 from core.junie_codes.call_routing import get_routing_engine, RoutingDecision
 
 # Configure logging

@@ -6,10 +6,10 @@ import logging
 import asyncio
 
 from core.models import Tenant
-from core.session.session_manager import SessionManager, get_session_manager
+from core.junie_codes.session import SessionManager, get_session_manager
 from core.junie_codes.ami.ami_manager import AMIConnectionConfig, ConnectionStats
 from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime, timedelta
+from datetime import timedelta
 import panoramisk
 
 from django.utils import timezone

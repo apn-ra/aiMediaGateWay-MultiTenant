@@ -23,7 +23,7 @@ class Command(BaseCommand):
     async def handle_async(self, *args, **options):
         event_handler = AMIEventHandler()
         connection = await event_handler.register_handlers(2)
-        asyncio.create_task(connection.connect())
+        task = asyncio.create_task(connection.connect())
         await asyncio.get_running_loop().create_future()
 
     def handle(self, *args, **options):

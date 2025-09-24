@@ -22,14 +22,14 @@ from core.junie_codes.ami.ami_events import (
     get_event_handler,
     cleanup_event_handler
 )
-from core.ari.ari_manager import (
+from core.junie_codes.ari import (
     ARIConnectionStats,
     ARIConnection,
     ARIManager,
     get_ari_manager,
     cleanup_ari_manager
 )
-from core.ari.ari_events import (
+from core.junie_codes.ari import (
     ARIEventStats,
     ARIEventHandler,
     get_ari_event_handler,

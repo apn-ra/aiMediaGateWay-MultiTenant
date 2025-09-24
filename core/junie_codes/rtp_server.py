@@ -24,7 +24,7 @@ import collections
 import numpy as np
 
 from core.models import Tenant
-from core.session.session_manager import get_session_manager
+from core.session.manager import get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class RTPPacket:
 class RTPEndpoint:
     """RTP endpoint configuration for a session"""
     session_id: str
-    tenant_id: str
+    tenant_id: int
     local_port: int
     remote_host: str
     remote_port: int
@@ -1000,7 +1000,7 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
             packet = self._parse_rtp_packet(data, addr)
             if packet:
                 # Process packet asynchronously
-                asyncio.create_task(self.rtp_server._process_rtp_packet(packet))
+                asyncio.create_task(self.rtp_server.process_rtp_packet(packet))
         except Exception as e:
             logger.error(f"Error processing RTP packet from {addr}: {e}")
 
@@ -1119,7 +1119,7 @@ class RTPServer:
         self._lock = asyncio.Lock()
         logger.info("RTP Server initialized")
 
-    async def create_endpoint(self, session_id: str, tenant_id: str,
+    async def create_endpoint(self, session_id: str, tenant_id: int,
                               remote_host: str, remote_port: int,
                               codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint for a session"""
@@ -1164,7 +1164,7 @@ class RTPServer:
             logger.error(f"Error creating RTP endpoint: {e}")
             return None
 
-    async def _get_available_port(self, tenant_id: str) -> Optional[int]:
+    async def _get_available_port(self, tenant_id: int) -> Optional[int]:
         """Get an available port within tenant's range"""
         try:
             # Get tenant configuration
@@ -1213,7 +1213,7 @@ class RTPServer:
             logger.error(f"Error starting RTP server on port {port}: {e}")
             return False
 
-    async def _process_rtp_packet(self, packet: RTPPacket):
+    async def process_rtp_packet(self, packet: RTPPacket):
         """Process incoming RTP packet"""
         try:
             # Find endpoint by source port (assuming standard port mapping)
@@ -1405,7 +1405,7 @@ class RTPSessionEndpointManager:
         except Exception as e:
             logger.error(f"Error stopping RTP endpoint management: {e}")
 
-    async def create_session_endpoint(self, session_id: str, tenant_id: str,
+    async def create_session_endpoint(self, session_id: str, tenant_id: int,
                                       remote_host: str, remote_port: int,
                                       codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint with full session management"""
@@ -1586,7 +1586,7 @@ class RTPSessionEndpointManager:
                         'codec': endpoint.codec
                     }
                 })
-                await self.session_manager.update_session(session_id, session)
+                await self.session_manager.update_session(session_id, session.to_dict())
 
         except Exception as e:
             logger.error(f"Error updating session endpoint info: {e}")
@@ -1596,10 +1596,10 @@ class RTPSessionEndpointManager:
         try:
             session = await self.session_manager.get_session(session_id)
             if session:
-                session.rtp_endpoint_host = None
-                session.rtp_endpoint_port = None
-                session.metadata.pop('rtp_endpoint', None)
-                await self.session_manager.update_session(session_id, session)
+                # session.rtp_endpoint_host = None
+                # session.rtp_endpoint_port = None
+                # session.metadata.pop('rtp_endpoint', None)
+                await self.session_manager.update_session(session_id, session.to_dict())
 
         except Exception as e:
             logger.error(f"Error clearing session endpoint info: {e}")

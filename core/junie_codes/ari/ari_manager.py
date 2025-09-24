@@ -16,7 +16,6 @@ import logging
 from ari import ARIClient, ARIConfig
 from ari.circuit_breaker import CircuitBreaker
 from ari.exceptions import (
-    ARIError,
     ConnectionError as ARIConnectionError,
     AuthenticationError,
     HTTPError,
@@ -33,7 +32,7 @@ from django.utils import timezone
 
 
 from core.models import Tenant, SystemConfiguration
-from core.session.session_manager import get_session_manager
+from core.junie_codes.session.session_manager import get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -767,7 +766,7 @@ def cleanup_ari_manager():
         try:
             # Try to create task if event loop is running
             loop = asyncio.get_running_loop()
-            asyncio.create_task(_ari_manager.disconnect_all())
+            loop.create_task(_ari_manager.disconnect_all())
         except RuntimeError:
             # No event loop running, cleanup without disconnection
             logger.debug("No event loop running, cleaning up ARI manager without disconnection")

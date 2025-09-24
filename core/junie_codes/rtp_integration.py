@@ -16,8 +16,9 @@ import logging
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 from django.utils import timezone
+from decouple import config
 
-from core.session.session_manager import get_session_manager, CallSessionData
+from core.session.manager import get_session_manager, CallSessionData
 from core.junie_codes.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class RTPSessionIntegrator:
             await self.endpoint_manager.start()
             
             # Start integration tasks
-            self.sync_task = asyncio.create_task(self._sync_loop())
+            # self.sync_task = asyncio.create_task(self._sync_loop())
             self.cleanup_task = asyncio.create_task(self._cleanup_loop())
             
             logger.info("RTP Session Integrator started successfully")
@@ -207,7 +208,7 @@ class RTPSessionIntegrator:
                 codec = routing_decision.metadata.get('preferred_codec', 'ulaw')
             
             # Use localhost for now - in production this would be configurable
-            remote_host = "127.0.0.1"
+            remote_host = config('AI_MEDIA_GATEWAY_HOST', default='127.0.0.1')
             remote_port = 5060  # Default SIP port, should be from session/routing
             
             # Create endpoint
@@ -260,7 +261,10 @@ class RTPSessionIntegrator:
             
             session = await self.session_manager.get_session(session_id)
             if session:
+                logger.info(f"End point: {endpoint}")
                 # Update session metadata with RTP info
+                session.rtp_endpoint_host = endpoint.remote_host
+                session.rtp_endpoint_port = endpoint.local_port
                 session.metadata.update({
                     'rtp_integration': {
                         'endpoint_port': endpoint.local_port,
@@ -269,7 +273,7 @@ class RTPSessionIntegrator:
                     }
                 })
                 
-                await self.session_manager.update_session(session_id, session)
+                await self.session_manager.update_session(session_id, session.to_dict())
                 
         except Exception as e:
             logger.error(f"Error updating session {session_id} with RTP info: {e}")

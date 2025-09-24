@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from core.junie_codes.ami.ami_manager import get_ami_manager
 from core.models import Tenant, CallSession
-from core.session.session_manager import CallSessionData, get_session_manager
+from core.session.manager import CallSessionData, get_session_manager
 
 logger = logging.getLogger(__name__)
 

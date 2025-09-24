@@ -22,10 +22,10 @@ from django.utils import timezone
 from django.contrib.auth.models import AnonymousUser
 
 # Import our components
-from core.session.session_manager import get_session_manager
-from core.audio.audio_streaming import get_streaming_manager, StreamingProtocol, StreamQuality, StreamingFormat
-from core.audio.audio_recording import get_recording_manager
-from core.audio.audio_quality import get_quality_manager
+from core.junie_codes.session import get_session_manager
+from core.junie_codes.audio.audio_streaming import get_streaming_manager, StreamingProtocol, StreamQuality, StreamingFormat
+from core.junie_codes.audio import get_recording_manager
+from core.junie_codes.audio.audio_quality import get_quality_manager
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +352,7 @@ class LiveAudioStreamConsumer(AsyncWebsocketConsumer):
     async def _setup_audio_streaming(self):
         """Setup audio streaming connection"""
         try:
-            from core.audio.audio_streaming import StreamConnection, StreamingConfig
+            from core.junie_codes.audio.audio_streaming import StreamConnection, StreamingConfig
             import time
             
             config = StreamingConfig(

@@ -28,8 +28,8 @@ from django.utils import timezone
 from django.conf import settings
 
 # Import our components
-from core.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
-from core.audio.audio_recording import RecordingSession
+from core.junie_codes.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
+from core.junie_codes.audio.audio_recording import RecordingSession
 
 logger = logging.getLogger(__name__)
 
