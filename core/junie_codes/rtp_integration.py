@@ -19,7 +19,11 @@ from django.utils import timezone
 from decouple import config
 
 from core.session.manager import get_session_manager, CallSessionData
-from core.junie_codes.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector
+from core.junie_codes.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector, AudioFrame
+from core.junie_codes.audio.audio_transcription import get_transcription_manager
+from core.junie_codes.audio.audio_streaming import get_streaming_manager
+from core.junie_codes.audio.audio_recording import get_recording_manager
+from core.junie_codes.audio.audio_quality import get_quality_manager
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,12 @@ class RTPSessionIntegrator:
         self.rtp_server = get_rtp_server()
         self.endpoint_manager = RTPSessionEndpointManager(self.rtp_server)
         self.statistics_collector = RTPStatisticsCollector()
+        
+        # Audio processing managers
+        self.transcription_manager = get_transcription_manager()
+        self.streaming_manager = get_streaming_manager()
+        self.recording_manager = get_recording_manager()
+        self.quality_manager = get_quality_manager()
         
         # Integration state
         self.active_integrations: Dict[str, Dict[str, Any]] = {}  # session_id -> integration data
@@ -135,12 +145,47 @@ class RTPSessionIntegrator:
             if self.config.enable_quality_monitoring:
                 quality_monitor = self.statistics_collector.create_quality_monitor(session_id)
             
+            # Initialize audio processing components
+            audio_quality_analyzer = None
+            audio_streaming_registered = False
+            audio_recording_started = False
+            audio_transcription_started = False
+
+            try:
+                # Initialize quality analyzer
+                audio_quality_analyzer = self.quality_manager.create_analyzer(session_id)
+
+                # Register session for streaming
+                await self.streaming_manager.register_session(session_id)
+                audio_streaming_registered = True
+
+                # Start recording if configured
+                recording_config = getattr(self.config, 'recording_config', None)
+                if recording_config or True:  # Default to enable recording
+                    await self.recording_manager.start_recording(session_id, session.tenant_id, recording_config)
+                    audio_recording_started = True
+
+                # Start real-time transcription if configured
+                transcription_config = getattr(self.config, 'transcription_config', None)
+                if transcription_config or True:  # Default to enable transcription
+                    await self.transcription_manager.start_real_time_transcription(session_id, transcription_config)
+                    audio_transcription_started = True
+
+                logger.info(f"Audio processing components initialized for session {session_id}")
+
+            except Exception as e:
+                logger.error(f"Error initializing audio processing components for session {session_id}: {e}")
+            
             # Store integration data
             integration_data = {
                 'session_id': session_id,
                 'tenant_id': session.tenant_id,
                 'endpoint': endpoint,
                 'quality_monitor': quality_monitor,
+                'audio_quality_analyzer': audio_quality_analyzer,
+                'audio_streaming_registered': audio_streaming_registered,
+                'audio_recording_started': audio_recording_started,
+                'audio_transcription_started': audio_transcription_started,
                 'created_at': timezone.now(),
                 'last_sync': timezone.now(),
                 'stats': {
@@ -152,9 +197,9 @@ class RTPSessionIntegrator:
             
             self.active_integrations[session_id] = integration_data
             
-            # Register packet handler for this session
-            if endpoint and quality_monitor:
-                await self._register_packet_handler(session_id, quality_monitor)
+            # Register packet handlers for this session
+            if endpoint:
+                await self._register_packet_handlers(session_id, integration_data)
             
             # Update session with RTP information
             await self._update_session_with_rtp_info(session_id, endpoint)
@@ -226,32 +271,101 @@ class RTPSessionIntegrator:
             logger.error(f"Error creating RTP endpoint for session {session.session_id}: {e}")
             return None
     
-    async def _register_packet_handler(self, session_id: str, quality_monitor):
-        """Register packet handler for quality monitoring"""
+    async def _register_packet_handlers(self, session_id: str, integration_data: Dict[str, Any]):
+        """Register multiple packet handlers for comprehensive audio processing"""
         try:
-            async def packet_handler(packet, endpoint):
-                """Handle RTP packet for quality monitoring"""
+            async def comprehensive_packet_handler(packet, endpoint):
+                """Handle RTP packet for all audio processing functionalities"""
                 try:
-                    if endpoint.session_id == session_id:
-                        # Update quality monitor
-                        quality_monitor.update_with_packet(packet)
+                    if endpoint.session_id != session_id:
+                        return
                         
-                        # Update integration stats
-                        if session_id in self.active_integrations:
-                            stats = self.active_integrations[session_id]['stats']
-                            stats['packets_processed'] += 1
-                            stats['bytes_processed'] += packet.size
-                            
+                    # Update integration stats
+                    if session_id in self.active_integrations:
+                        stats = self.active_integrations[session_id]['stats']
+                        stats['packets_processed'] += 1
+                        stats['bytes_processed'] += packet.size
+                    
+                    # Convert RTP packet to AudioFrame for audio processing
+                    audio_frame = self._convert_rtp_to_audio_frame(packet, endpoint)
+                    if not audio_frame:
+                        return
+                    
+                    # 1. Quality Monitoring
+                    quality_monitor = integration_data.get('quality_monitor')
+                    if quality_monitor:
+                        quality_monitor.update_with_packet(packet)
+                    
+                    # Additional quality analysis
+                    audio_quality_analyzer = integration_data.get('audio_quality_analyzer')
+                    if audio_quality_analyzer:
+                        self.quality_manager.add_audio_frame(session_id, audio_frame)
+                    
+                    # 2. Audio Streaming
+                    if integration_data.get('audio_streaming_registered'):
+                        await self.streaming_manager.stream_audio_frame(session_id, audio_frame)
+                    
+                    # 3. Audio Recording
+                    if integration_data.get('audio_recording_started'):
+                        await self.recording_manager.add_audio_frame(session_id, audio_frame)
+                    
+                    # 4. Audio Transcription (process audio frame for transcription)
+                    if integration_data.get('audio_transcription_started'):
+                        # Note: Transcription typically works with accumulated audio data
+                        # This might need buffering or periodic processing
+                        await self._process_audio_for_transcription(session_id, audio_frame)
+                        
                 except Exception as e:
-                    logger.error(f"Error in packet handler for session {session_id}: {e}")
+                    logger.error(f"Error in comprehensive packet handler for session {session_id}: {e}")
                     if session_id in self.active_integrations:
                         self.active_integrations[session_id]['stats']['errors'] += 1
             
-            # Register handler with RTP server
-            self.rtp_server.register_packet_handler(packet_handler)
+            # Register the comprehensive handler with RTP server
+            self.rtp_server.register_packet_handler(comprehensive_packet_handler)
+            logger.info(f"Registered comprehensive packet handler for session {session_id}")
             
         except Exception as e:
-            logger.error(f"Error registering packet handler for session {session_id}: {e}")
+            logger.error(f"Error registering packet handlers for session {session_id}: {e}")
+    
+    def _convert_rtp_to_audio_frame(self, packet, endpoint) -> Optional[AudioFrame]:
+        """Convert RTP packet to AudioFrame for audio processing"""
+        try:
+            # Create AudioFrame from RTP packet data
+            audio_frame = AudioFrame(
+                data=packet.payload,
+                timestamp=packet.header.timestamp,
+                sequence_number=packet.header.sequence_number,
+                codec=endpoint.codec,
+                sample_rate=8000,  # Default for most telephony codecs
+                channels=1,
+                session_id=endpoint.session_id
+            )
+            return audio_frame
+        except Exception as e:
+            logger.error(f"Error converting RTP packet to AudioFrame: {e}")
+            return None
+    
+    async def _process_audio_for_transcription(self, session_id: str, audio_frame: AudioFrame):
+        """Process audio frame for real-time transcription"""
+        try:
+            # For real-time transcription, we might need to buffer frames
+            # and send them periodically to the transcription service
+            # This is a simplified implementation
+            
+            # Convert audio frame to bytes for transcription
+            audio_data = audio_frame.data
+            
+            # Note: This is a simplified approach. In practice, you might want to:
+            # 1. Buffer audio frames for a certain duration (e.g., 1-2 seconds)
+            # 2. Convert to the required format for transcription
+            # 3. Send to transcription service periodically
+            
+            # For now, we'll just log that transcription processing would happen here
+            logger.debug(f"Processing audio frame for transcription: session={session_id}, "
+                        f"frame_size={len(audio_data)} bytes")
+                        
+        except Exception as e:
+            logger.error(f"Error processing audio for transcription in session {session_id}: {e}")
     
     async def _update_session_with_rtp_info(self, session_id: str, endpoint: Optional[RTPEndpoint]):
         """Update session with RTP endpoint information"""

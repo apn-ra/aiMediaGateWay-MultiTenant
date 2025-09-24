@@ -99,7 +99,7 @@ class RecordingSession:
     """Active recording session"""
     recording_id: str
     session_id: str
-    tenant_id: str
+    tenant_id: int
     config: RecordingConfig
     state: RecordingState
     start_time: datetime
@@ -490,7 +490,7 @@ class AudioRecordingManager:
     async def start_recording(
         self,
         session_id: str,
-        tenant_id: str,
+        tenant_id: int,
         config: RecordingConfig = None
     ) -> Optional[str]:
         """Start recording for a session"""
