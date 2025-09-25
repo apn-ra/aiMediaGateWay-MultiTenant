@@ -15,15 +15,16 @@ import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from django.utils import timezone
-from decouple import config
 
 from core.session.manager import get_session_manager, CallSessionData
 from core.junie_codes.rtp_server import get_rtp_server, RTPEndpoint, RTPSessionEndpointManager, RTPStatisticsCollector, AudioFrame
-from core.junie_codes.audio.audio_transcription import get_transcription_manager
+from core.junie_codes.audio.audio_transcription import get_transcription_manager, TranscriptionConfig, TranscriptionProvider, LanguageCode
 from core.junie_codes.audio.audio_streaming import get_streaming_manager
 from core.junie_codes.audio.audio_recording import get_recording_manager
 from core.junie_codes.audio.audio_quality import get_quality_manager
+from core.junie_codes.audio.audio_conversion import get_audio_converter, AudioSpec, AudioFormat
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class RTPSessionIntegrator:
         self.streaming_manager = get_streaming_manager()
         self.recording_manager = get_recording_manager()
         self.quality_manager = get_quality_manager()
+        self.audio_converter = get_audio_converter()
         
         # Integration state
         self.active_integrations: Dict[str, Dict[str, Any]] = {}  # session_id -> integration data
@@ -75,6 +77,11 @@ class RTPSessionIntegrator:
             'session_ended': [],
             'session_error': []
         }
+        
+        # Audio buffering for transcription
+        self.audio_buffers: Dict[str, List[AudioFrame]] = {}  # session_id -> audio frames
+        self.buffer_locks: Dict[str, asyncio.Lock] = {}  # session_id -> lock for thread safety
+        self.last_transcription_time: Dict[str, datetime] = {}  # session_id -> last transcription timestamp
         
         logger.info("RTP Session Integrator initialized")
     
@@ -153,23 +160,23 @@ class RTPSessionIntegrator:
 
             try:
                 # Initialize quality analyzer
-                audio_quality_analyzer = self.quality_manager.create_analyzer(session_id)
+                # audio_quality_analyzer = self.quality_manager.create_analyzer(session_id)
 
                 # Register session for streaming
-                await self.streaming_manager.register_session(session_id)
-                audio_streaming_registered = True
+                # await self.streaming_manager.register_session(session_id)
+                # audio_streaming_registered = True
 
                 # Start recording if configured
-                recording_config = getattr(self.config, 'recording_config', None)
-                if recording_config or True:  # Default to enable recording
-                    await self.recording_manager.start_recording(session_id, session.tenant_id, recording_config)
-                    audio_recording_started = True
+                # recording_config = getattr(self.config, 'recording_config', None)
+                # if recording_config or True:  # Default to enable recording
+                #     await self.recording_manager.start_recording(session_id, session.tenant_id, recording_config)
+                #    audio_recording_started = True
 
                 # Start real-time transcription if configured
-                transcription_config = getattr(self.config, 'transcription_config', None)
-                if transcription_config or True:  # Default to enable transcription
-                    await self.transcription_manager.start_real_time_transcription(session_id, transcription_config)
-                    audio_transcription_started = True
+                # transcription_config = getattr(self.config, 'transcription_config', None)
+                # if transcription_config or True:  # Default to enable transcription
+                #     await self.transcription_manager.start_real_time_transcription(session_id, transcription_config)
+                #     audio_transcription_started = True
 
                 logger.info(f"Audio processing components initialized for session {session_id}")
 
@@ -248,19 +255,17 @@ class RTPSessionIntegrator:
         """Create RTP endpoint for session"""
         try:
             # Determine codec from routing decision or use default
-            codec = "ulaw"  # Default codec
+            codec = "slin16"  # Default codec
             if routing_decision and hasattr(routing_decision, 'metadata'):
                 codec = routing_decision.metadata.get('preferred_codec', 'ulaw')
-            
-            # Use localhost for now - in production this would be configurable
-            remote_host = config('AI_MEDIA_GATEWAY_HOST', default='127.0.0.1')
+
             remote_port = 5060  # Default SIP port, should be from session/routing
             
             # Create endpoint
             endpoint = await self.endpoint_manager.create_session_endpoint(
                 session.session_id,
                 session.tenant_id,
-                remote_host,
+                session.asterisk_host,
                 remote_port,
                 codec
             )
@@ -326,8 +331,9 @@ class RTPSessionIntegrator:
             
         except Exception as e:
             logger.error(f"Error registering packet handlers for session {session_id}: {e}")
-    
-    def _convert_rtp_to_audio_frame(self, packet, endpoint) -> Optional[AudioFrame]:
+
+    @staticmethod
+    def _convert_rtp_to_audio_frame(packet, endpoint) -> Optional[AudioFrame]:
         """Convert RTP packet to AudioFrame for audio processing"""
         try:
             # Create AudioFrame from RTP packet data
@@ -336,8 +342,8 @@ class RTPSessionIntegrator:
                 timestamp=packet.header.timestamp,
                 sequence_number=packet.header.sequence_number,
                 codec=endpoint.codec,
-                sample_rate=8000,  # Default for most telephony codecs
-                channels=1,
+                sample_rate=endpoint.sample_rate,
+                channels=endpoint.channels,
                 session_id=endpoint.session_id
             )
             return audio_frame
@@ -348,24 +354,156 @@ class RTPSessionIntegrator:
     async def _process_audio_for_transcription(self, session_id: str, audio_frame: AudioFrame):
         """Process audio frame for real-time transcription"""
         try:
-            # For real-time transcription, we might need to buffer frames
-            # and send them periodically to the transcription service
-            # This is a simplified implementation
+            # Initialize session-specific resources if not present
+            if session_id not in self.audio_buffers:
+                self.audio_buffers[session_id] = []
+                self.buffer_locks[session_id] = asyncio.Lock()
+                self.last_transcription_time[session_id] = datetime.now()
+                logger.debug(f"Initialized audio buffer for session {session_id}")
             
-            # Convert audio frame to bytes for transcription
-            audio_data = audio_frame.data
-            
-            # Note: This is a simplified approach. In practice, you might want to:
-            # 1. Buffer audio frames for a certain duration (e.g., 1-2 seconds)
-            # 2. Convert to the required format for transcription
-            # 3. Send to transcription service periodically
-            
-            # For now, we'll just log that transcription processing would happen here
-            logger.debug(f"Processing audio frame for transcription: session={session_id}, "
-                        f"frame_size={len(audio_data)} bytes")
+            # Acquire lock for thread-safe buffer operations
+            async with self.buffer_locks[session_id]:
+                # Add frame to buffer
+                self.audio_buffers[session_id].append(audio_frame)
+                
+                # Check if we should trigger transcription
+                current_time = datetime.now()
+                time_since_last = (current_time - self.last_transcription_time[session_id]).total_seconds()
+                buffer_size = len(self.audio_buffers[session_id])
+                
+                # Trigger transcription if buffer has enough frames or enough time has passed
+                should_transcribe = (
+                    buffer_size >= 50 or  # ~1 second at 20ms per frame
+                    time_since_last >= 2.0  # Force transcription every 2 seconds
+                )
+                
+                if should_transcribe and buffer_size > 0:
+                    # Extract frames for transcription
+                    frames_to_process = self.audio_buffers[session_id].copy()
+                    self.audio_buffers[session_id].clear()
+                    self.last_transcription_time[session_id] = current_time
+                    
+                    logger.debug(f"Processing {len(frames_to_process)} audio frames for transcription in session {session_id}")
+                    
+                    # Process frames in background to avoid blocking
+                    asyncio.create_task(self._transcribe_audio_frames(session_id, frames_to_process))
                         
         except Exception as e:
             logger.error(f"Error processing audio for transcription in session {session_id}: {e}")
+    
+    async def _transcribe_audio_frames(self, session_id: str, frames: List[AudioFrame]):
+        """Transcribe a batch of audio frames"""
+        try:
+            if not frames:
+                return
+            
+            # Combine audio frames into a single audio stream
+            combined_audio_data = await self._combine_audio_frames(frames)
+            
+            # Convert audio format for transcription (most services expect WAV/PCM)
+            transcription_ready_audio = await self._convert_audio_for_transcription(combined_audio_data, frames[0])
+            
+            if not transcription_ready_audio:
+                logger.warning(f"Failed to convert audio for transcription in session {session_id}")
+                return
+            
+            # Configure transcription
+            transcription_config = TranscriptionConfig(
+                provider=TranscriptionProvider.NVIDIA_RIVA,  # Can be configured
+                language=LanguageCode.AUTO_DETECT,
+                enable_punctuation=True,
+                enable_profanity_filter=False,
+                model_name="citrinet-1024"  # RIVA specific
+            )
+            
+            # Transcribe using the transcription manager
+            result = await self.transcription_manager.transcribe_session_audio(
+                session_id=session_id,
+                audio_data=transcription_ready_audio,
+                config=transcription_config
+            )
+            
+            if result and result.segments:
+                # Log successful transcription (in practice, you might want to emit events)
+                total_text = " ".join([segment.text for segment in result.segments])
+                logger.info(f"Transcription result for session {session_id}: '{total_text}'")
+                
+                # Could emit transcription events here for real-time display
+                # await self._emit_transcription_event(session_id, result)
+            else:
+                logger.debug(f"No transcription result for session {session_id}")
+                
+        except Exception as e:
+            logger.error(f"Error transcribing audio frames for session {session_id}: {e}")
+
+    @staticmethod
+    async def _combine_audio_frames(frames: List[AudioFrame]) -> bytes:
+        """Combine multiple audio frames into a single audio stream"""
+        try:
+            # Sort frames by sequence number to ensure correct order
+            sorted_frames = sorted(frames, key=lambda f: f.sequence_number)
+            
+            # Combine audio data
+            combined_data = b''.join([frame.data for frame in sorted_frames])
+            
+            logger.debug(f"Combined {len(sorted_frames)} frames into {len(combined_data)} bytes")
+            return combined_data
+            
+        except Exception as e:
+            logger.error(f"Error combining audio frames: {e}")
+            return b''
+    
+    async def _convert_audio_for_transcription(self, audio_data: bytes, sample_frame: AudioFrame) -> Optional[bytes]:
+        """Convert audio data to format suitable for transcription"""
+        try:
+            if not audio_data:
+                return None
+            
+            # Determine source audio format based on codec
+            codec_to_format = {
+                'ulaw': AudioFormat.ULAW,
+                'alaw': AudioFormat.ALAW,
+                'slin16': AudioFormat.SLIN16,
+                'pcm': AudioFormat.PCM_LINEAR,
+                'linear': AudioFormat.PCM_LINEAR
+            }
+            
+            source_format = codec_to_format.get(sample_frame.codec.lower(), AudioFormat.ULAW)
+            
+            # Create source audio specification
+            source_spec = AudioSpec(
+                format=source_format,
+                sample_rate=sample_frame.sample_rate or 8000,
+                bit_depth=16,
+                channels=sample_frame.channels or 1
+            )
+            
+            # Create target specification (WAV format for transcription)
+            target_spec = AudioSpec(
+                format=AudioFormat.WAV,
+                sample_rate=16000,  # Standard rate for transcription
+                bit_depth=16,
+                channels=1
+            )
+            
+            # Convert audio format
+            conversion_result = self.audio_converter.convert(
+                data=audio_data,
+                source_spec=source_spec,
+                target_spec=target_spec,
+                use_cache=True
+            )
+            
+            if conversion_result and conversion_result.success:
+                logger.debug(f"Successfully converted audio: {len(audio_data)} -> {len(conversion_result.data)} bytes")
+                return conversion_result.data
+            else:
+                logger.error(f"Audio conversion failed: {conversion_result.error if conversion_result else 'Unknown error'}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error converting audio for transcription: {e}")
+            return None
     
     async def _update_session_with_rtp_info(self, session_id: str, endpoint: Optional[RTPEndpoint]):
         """Update session with RTP endpoint information"""
@@ -375,9 +513,8 @@ class RTPSessionIntegrator:
             
             session = await self.session_manager.get_session(session_id)
             if session:
-                logger.info(f"End point: {endpoint}")
                 # Update session metadata with RTP info
-                session.rtp_endpoint_host = endpoint.remote_host
+                # logger.info(f"Session: {session}")
                 session.rtp_endpoint_port = endpoint.local_port
                 session.metadata.update({
                     'rtp_integration': {

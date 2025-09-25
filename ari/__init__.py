@@ -66,7 +66,6 @@ from ari.models import (
 from ari.resources import (
     ResourceManager,
     ChannelResource,
-    BridgeResource,
     PlaybackResource,
     RecordingResource,
     EndpointResource,
@@ -125,7 +124,6 @@ __all__ = [
     # Resource classes
     "ResourceManager",
     "ChannelResource",
-    "BridgeResource",
     "PlaybackResource",
     "RecordingResource",
     "EndpointResource",

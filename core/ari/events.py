@@ -4,8 +4,11 @@
 import logging
 import asyncio
 
+from numpy.random.tests.test_generator_mt19937 import endpoint
+
 logger = logging.getLogger(__name__)
 
+from decouple import config
 from core.session.manager import get_session_manager
 from core.ari.manager import get_ari_manager, ARIConnection
 from core.junie_codes.rtp_integration import get_rtp_integrator
@@ -19,6 +22,7 @@ class ARIEventHandler:
         self.session_manager = None
         self.ari_manager = None
         self._tenant_cache = {}
+        self.bridges = {}
         self._event_statistics = {
             'new_channel': 0,
             'dial': 0,
@@ -34,6 +38,7 @@ class ARIEventHandler:
         self.ari_manager = get_ari_manager()
         self.rtp_integrator = get_rtp_integrator()
         self.tenant_id = tenant_id
+
         await self.rtp_integrator.start()
 
     async def register_handlers(self, tenant_id: int) -> ARIConnection:
@@ -48,11 +53,27 @@ class ARIEventHandler:
             tenant_id, 'StasisEnd', self.handle_StasisEnd
         )
 
+        await self.ari_manager.register_event_handler(
+            tenant_id, 'Dial', self.handle_dial
+        )
+
+        # await self.ari_manager.register_event_handler(
+        #     tenant_id, 'ChannelDestroyed', self.handle_channel_state_change
+        # )
+
         # await self.ari_manager.register_event_handler(
         #     tenant_id, 'ChannelStateChange', self.handle_channel_state_change
         # )
 
         return self.ari_manager.connections[tenant_id]
+
+    async def handle_dial(self, event_data):
+        """Handle dial events."""
+        self._event_statistics['dial'] += 1
+        logger.info(f"Dialing Event Data: {event_data}")
+        if event_data['dialstatus'] == 'ANSWER':
+            logger.info(f"Adding Channel {event_data['peer']['id']} to bridge {self.bridges[self.tenant_id].id}")
+            await self.bridges[self.tenant_id].add_channel(event_data['peer']['id'])
 
     async def handle_channel_state_change(self, event_data):
         """Handle channel state change events."""
@@ -66,54 +87,53 @@ class ARIEventHandler:
         channel_id = channel['id']
 
         client = self.ari_manager.connections[self.tenant_id].client
+        event_data['asterisk_host'] = self.ari_manager.connections[self.tenant_id].config.host
+        event_data['rtp_endpoint_host'] = config('AI_MEDIA_GATEWAY_HOST')
+
         try:
             # Create a new session
             session_data = self.session_manager.create_session_from_event(self.tenant_id, event_data)
-            session_id = await self.session_manager.create_session(session_data)
-            if session_id:
-                logger.info(f"Created session { session_id } for channelId { channel_id }")
-                self._event_statistics['new_channel'] += 1
+            if session_data:
+                session_id = await self.session_manager.create_session(session_data)
+                exten = session_data.channel.dialplan.exten
+                caller_id = session_data.channel.caller.name or ''
 
+                if session_id:
+                    logger.info(f"Created session { session_id } for channelId { channel_id }")
+                    self._event_statistics['new_channel'] += 1
+
+                else:
+                    logger.error(f"Failed to create session for channel { channel }")
+
+                # Provide slight delay
+                await asyncio.sleep(0.1)
+
+                # Integrate the session
+                # status = await self.rtp_integrator.integrate_session(session_id=session_id)
+                # if status:
+                self.bridges[self.tenant_id] = await client.create_bridge(bridge_type="mixing")
+                await self.bridges[self.tenant_id].add_channel(channel_id)
+
+                await client.create_channel(endpoint=f"PJSIP/{exten}", app="live-transcript", app_args="--no-video")
+
+                    # session = await self.session_manager.get_session(session_id)
+                    # logger.info(f"ExternalMedia Host: {session.rtp_endpoint_host} Port: {session.rtp_endpoint_port}")
+                    # external = await client.create_external_media(
+                    #     app=client.config.app_name,
+                    #     external_host=f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}",
+                    #     codec="slin16",
+                    #     transport="rtp",
+                    #     direction="in",
+                    #     connection_type="client",
+                    # )
+                    #
+                    # await bridge.add_channel(channel_id)
+                    # await bridge.add_channel(external.id)
+                    # self._event_statistics['bridge'] += 1
+                    # logger.info(f"ExternalMedia connected: {external.id}")
             else:
-                logger.error(f"Failed to create session for channel { channel }")
+                logger.error(f"Failed to create session for event data { event_data }")
 
-            # Provide slight delay
-            await asyncio.sleep(0.1)
-
-            # Integrate the session
-            status = await self.rtp_integrator.integrate_session(session_id=session_id)
-            if status:
-                session = await self.session_manager.get_session(session_id)
-                logger.info(f"ExternalMedia Host: {session.rtp_endpoint_host} Port: {session.rtp_endpoint_port}")
-                bridge = await client.create_bridge(bridge_type="mixing")
-                external = await client.create_external_media(
-                    app=client.config.app_name,
-                    external_host=f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}",
-                    codec="slin16",
-                    transport="udp",
-                    direction="send",
-                    connection_type="client",
-                )
-
-                await bridge.add_channel(channel_id)
-                await bridge.add_channel(external.id)
-                self._event_statistics['bridge'] += 1
-                logger.info(f"ExternalMedia connected: {external.id}")
-
-            # Another slight delay
-            await asyncio.sleep(0.1)
-
-            # Answer the channel
-            await client.answer_channel(channel_id)
-
-            # Play welcome message
-            await client.post(
-                f"/channels/{channel_id}/play",
-                json_data={'media': f'sound:demo-congrats'}
-            )
-
-            # continue to dialplan
-            await client.continue_to_dialplan(channel_id)
         except Exception as e:
             logger.error(f"Error handling call: {e}")
 

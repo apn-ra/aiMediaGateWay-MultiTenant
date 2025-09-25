@@ -58,6 +58,7 @@ class CallSessionData:
     session_id: str
     tenant_id: int
     asterisk_id: str
+    asterisk_host: str
     channel: ChannelData
     ari_control: bool = False
     direction: str = 'inbound'
@@ -128,23 +129,33 @@ class SessionManager:
         """Generate Redis key for channel to session mapping"""
         return f"{self.CHANNEL_PREFIX}:{channel_id}"
 
-    def create_session_from_event(self, tenant_id:int , event_data: Dict[str, Any]) -> CallSessionData:
-        channel = from_dict(
-            data_class=ChannelData,
-            data=event_data["channel"],
-            config=Config(type_hooks={datetime: lambda s: datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")})
-        )
+    def create_session_from_event(self, tenant_id:int , event_data: Dict[str, Any]) -> Optional[CallSessionData]:
+        data = None
+        if 'channel' in event_data:
+            data = event_data['channel']
+        elif 'peer' in event_data:
+            data = event_data['peer']
 
-        return CallSessionData(
-            session_id=channel.protocol_id,
-            tenant_id=tenant_id,
-            asterisk_id=event_data['asterisk_id'],
-            direction='inbound' if self._is_inbound_channel(channel.name) else 'outbound',
-            ari_control= True,
-            channel=channel,
-            status='answered',
-            call_start_time=timezone.now(),
-        )
+        if data:
+            channel = from_dict(
+                data_class=ChannelData,
+                data=event_data["channel"],
+                config=Config(type_hooks={datetime: lambda s: datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f%z")})
+            )
+
+            return CallSessionData(
+                session_id=channel.protocol_id,
+                tenant_id=tenant_id,
+                asterisk_id=event_data['asterisk_id'],
+                asterisk_host=event_data['asterisk_host'],
+                rtp_endpoint_host=event_data['rtp_endpoint_host'],
+                direction='inbound' if self._is_inbound_channel(channel.name) else 'outbound',
+                ari_control= True,
+                channel=channel,
+                status='answered',
+                call_start_time=timezone.now(),
+            )
+        return None
 
     @staticmethod
     def _is_inbound_channel(channel: str) -> bool:
@@ -234,6 +245,9 @@ class SessionManager:
         try:
             allowed_fields = set(f.name for f in CallSession._meta.get_fields())
             safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
+
+            if 'metadata' in safe_updates:
+                safe_updates['session_metadata'] = safe_updates.pop('metadata')
 
             await asyncio.to_thread(
                 lambda: CallSession.objects.filter(

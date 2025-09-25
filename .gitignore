@@ -169,5 +169,6 @@ test_audio/
 temp/
 tmp/
 .junie
+tests
 deployment/staging/.env.staging
 models/nemo_mt_models/*

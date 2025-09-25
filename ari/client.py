@@ -13,8 +13,7 @@ from types import TracebackType
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout, TCPConnector
 
-from ari import BridgeResource, ChannelResource
-from ari.resources import BridgeResource, ChannelResource
+from ari.resources import BridgeResource
 from ari.config import ARIConfig
 from ari.exceptions import (
     ARIError,
@@ -651,6 +650,8 @@ class ARIClient:
                         handler(event_data)
                 except Exception as e:
                     logger.error(f"Error in event handler for {event_type}: {e}")
+                    logger.error(f"Handler function: {handler}")
+                    logger.error(f"Event data: {event_data}")
 
         # Dispatch to wildcard handlers
         if '*' in self._event_handlers:
@@ -1059,6 +1060,16 @@ class ARIClient:
         """
         return await self.get(f"/channels/{channel_id}")
 
+    async def originate_call(self, endpoint: str, callerId: str, timeout:int = 30) -> Dict[str, Any]:
+        params = {
+            "endpoint": endpoint,
+            "app": self.config.app_name,
+            "callerId": callerId,
+            "timeout": timeout,
+        }
+
+        return await self.post("/channels", params=params)
+
     async def create_channel(
             self,
             endpoint: str,
@@ -1123,7 +1134,7 @@ class ARIClient:
             channel_id: Optional[str] = None,
             originating: Optional[bool] = False,
             variables: Optional[str] = None,
-    ) -> ChannelResource:
+    ) -> Dict[str, Any]:
         """
         Creates an external media channel by interacting with an external system using
         HTTP POST. This method allows specifying various parameters to configure the
@@ -1161,8 +1172,7 @@ class ARIClient:
         if variables:
             params["variables"] = variables
 
-        external = await self.post("/channels/externalMedia", params=params)
-        return ChannelResource(self, external)
+        return await self.post("/channels/externalMedia", params=params)
 
     async def answer_channel(self, channel_id: str) -> None:
         """Answer a channel.
@@ -1241,5 +1251,5 @@ class ARIClient:
         if name:
             params["name"] = name
 
-        bridge = await self.post("/bridges", params=params)
-        return BridgeResource(self, bridge)
+        created_bridge = await self.post("/bridges", params=params)
+        return BridgeResource(self, created_bridge)

@@ -24,8 +24,8 @@ from ari.models import (
 )
 from ari.exceptions import ARIError, ResourceNotFoundError, ValidationError
 
-if TYPE_CHECKING:
-    from ari.client import ARIClient
+# if TYPE_CHECKING:
+#     from ari.client import ARIClient
 
 logger = logging.getLogger(__name__)
 
@@ -323,17 +323,18 @@ class BridgeResource:
             logger.error(f"Failed to refresh bridge {self.id}: {e}")
             raise
 
-    async def add_channel(self, channel: Union[str, ChannelResource]) -> None:
+    async def add_channel(self, channel_id: str, role:str = 'participant', absorbDTMF:bool = False, muted:bool = False) -> None:
         """Add a channel to the bridge.
 
         Args:
-            channel: Channel ID or ChannelResource instance
+            channel_id: Channel ID
+            role: Role of the channel in the bridge (default: participant)
+            absorbDTMF: Absorb DTMF tones from the channel (default: false)
+            muted: Mute the channel (default: false)
         """
-        channel_id = channel.id if isinstance(channel, ChannelResource) else channel
 
         try:
-            await self._client.post(f"/bridges/{self.id}/addChannel",
-                                    json={"channel": channel_id})
+            await self._client.post(f"/bridges/{self.id}/addChannel?channel={channel_id}&role={role}&absorbDTMF={absorbDTMF}&muted={muted}")
             await self.refresh()
             logger.info(f"Added channel {channel_id} to bridge {self.id}")
         except Exception as e:
@@ -661,8 +662,8 @@ class EndpointResource:
 __all__ = [
     "ResourceManager",
     "ChannelResource",
-    "BridgeResource",
     "PlaybackResource",
     "RecordingResource",
     "EndpointResource",
+    "BridgeResource"
 ]

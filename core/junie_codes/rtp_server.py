@@ -63,6 +63,8 @@ class RTPEndpoint:
     remote_host: str
     remote_port: int
     codec: str = "ulaw"
+    sample_rate: int = 16000
+    channels: int = 1
     active: bool = True
     created_at: datetime = field(default_factory=timezone.now)
     last_packet_time: Optional[datetime] = None
@@ -1258,11 +1260,13 @@ class RTPServer:
             source_port = packet.source_address[1]
 
             # Try to find endpoint by matching remote address
-            for ep in self.endpoints.values():
-                if (ep.remote_host == packet.source_address[0] or
-                        ep.remote_port == source_port):
-                    endpoint = ep
-                    break
+            # for ep in self.endpoints.values():
+            #     if (ep.remote_host == packet.source_address[0] or
+            #             ep.remote_port == source_port):
+            #         endpoint = ep
+            #         break
+            if source_port in self.endpoints and self.endpoints[source_port].remote_host == packet.source_address[0]:
+                endpoint = self.endpoints[source_port]
 
             if not endpoint:
                 logger.debug(f"No endpoint found for packet from {packet.source_address}")
@@ -1282,6 +1286,11 @@ class RTPServer:
             if not codec_info:
                 logger.warning(f"Unknown codec payload type: {packet.header.payload_type}")
                 return
+
+            # Update codec, sample rate and channels according to the packet
+            endpoint.codec = codec_info['name']
+            endpoint.sample_rate = codec_info['sample_rate']
+            endpoint.channels = codec_info['channels']
 
             # Call registered packet handlers
             for handler in self.packet_handlers:
@@ -1613,7 +1622,6 @@ class RTPSessionEndpointManager:
         try:
             session = await self.session_manager.get_session(session_id)
             if session:
-                session.rtp_endpoint_host = "localhost"  # Or actual host
                 session.rtp_endpoint_port = endpoint.local_port
                 session.metadata.update({
                     'rtp_endpoint': {
