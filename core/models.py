@@ -53,12 +53,20 @@ class CallSession(models.Model):
         ('outbound', 'Outbound'),
     ]
 
+    CALL_TYPE = [
+        ('caller', 'Caller'),
+        ('callee', 'Callee'),
+    ]
+
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='call_sessions')
     asterisk_channel_id = models.CharField(max_length=255, unique=True)
     asterisk_unique_id = models.CharField(max_length=255, unique=True)
     caller_id_name = models.CharField(max_length=100, null=True, blank=True)
     caller_id_number = models.CharField(max_length=50, null=True, blank=True)
     dialed_number = models.CharField(max_length=50, null=True, blank=True)
+    call_type = models.CharField(max_length=10, choices=CALL_TYPE, default='caller')
+    channel_id = models.CharField(max_length=255, null=True, blank=True)
+    channel_name = models.CharField(max_length=255, null=True, blank=True)
     direction = models.CharField(max_length=10, choices=CALL_DIRECTION_CHOICES)
     status = models.CharField(max_length=20, choices=SESSION_STATUS_CHOICES, default='detected')
     bridge_id = models.CharField(max_length=255, null=True, blank=True)

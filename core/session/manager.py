@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from dacite import from_dict, Config
+
+from pydantic import UUID4
+
 from core.models import CallSession
 from django.conf import settings
 from django.utils import timezone
@@ -22,9 +25,9 @@ class DialplanData:
     """Dialplan data structure"""
     context: str
     exten: str
-    priority: int
-    app_name: str
-    app_data: str
+    priority: str
+    app_name: Optional[str] = None
+    app_data: Optional[str] = None
 
 @dataclass
 class CallerData:
@@ -35,8 +38,8 @@ class CallerData:
 @dataclass
 class ConnectedData:
     """Connected data structure"""
-    name: str
-    number: str
+    name: Optional[str] = None
+    number: Optional[str] = None
 
 @dataclass
 class ChannelData:
@@ -49,8 +52,8 @@ class ChannelData:
     accountcode: str
     connected: ConnectedData
     dialplan: DialplanData
-    creationtime: datetime
-    language: str
+    creationtime: Optional[datetime] = None
+    language: Optional[str] = 'en'
 
 @dataclass
 class CallSessionData:
@@ -62,6 +65,7 @@ class CallSessionData:
     channel: ChannelData
     ari_control: bool = False
     direction: str = 'inbound'
+    call_type: str = 'caller'
     status: str = 'detected'
     duration: Optional[int] = 0
     bridge_id: Optional[str] = None
@@ -129,7 +133,53 @@ class SessionManager:
         """Generate Redis key for channel to session mapping"""
         return f"{self.CHANNEL_PREFIX}:{channel_id}"
 
-    def create_session_from_event(self, tenant_id:int , event_data: Dict[str, Any]) -> Optional[CallSessionData]:
+    @staticmethod
+    def _get_call_type(exten:str) -> str:
+        if exten == '':
+            return 'callee'
+        return 'caller'
+
+    async def create_session_from_ami_bridge_enter_event(self,tenant_id:int, message: Dict[str, Any]) -> CallSessionData:
+        unique = message.get('Uniqueid', str(uuid.uuid4()))
+        asterisk_host = message.get('asterisk_host', 'localhost')
+        rtp_endpoint_host = message.get('rtp_endpoint_host', 'localhost')
+        call_type = self._get_call_type(message.get('Exten', ''))
+
+        return CallSessionData(
+            session_id=unique,
+            tenant_id=tenant_id,
+            asterisk_id=unique,
+            asterisk_host=asterisk_host,
+            rtp_endpoint_host=rtp_endpoint_host,
+            bridge_id=message.get('BridgeUniqueid'),
+            direction='inbound' if call_type == 'callee' else 'outbound',
+            call_type=call_type,
+            ari_control= False,
+            status='bridged',
+            channel= ChannelData(
+                id=unique,
+                name=message.get('Channel'),
+                state=message.get('ChannelStateDesc'),
+                protocol_id=unique,
+                caller=CallerData(
+                    name=message.get('CallerIDName', ''),
+                    number=message.get('CallerIDNum', '')
+                ),
+                accountcode=message.get('AccountCode'),
+                connected=ConnectedData(
+                    name=message.get('ConnectedIDName', ''),
+                    number=message.get('ConnectedIDNum', '')
+                ),
+                dialplan=DialplanData(
+                    exten=message.get('Exten', ''),
+                    context=message.get('Context'),
+                    priority=message.get('Priority'),
+                )
+            ),
+            call_start_time=timezone.now(),
+            call_answer_time=timezone.now(),
+        )
+    def create_session_from_ari_event(self, tenant_id:int , event_data: Dict[str, Any]) -> Optional[CallSessionData]:
         data = None
         if 'channel' in event_data:
             data = event_data['channel']
@@ -221,11 +271,14 @@ class SessionManager:
                     tenant_id=session_data.tenant_id,
                     asterisk_channel_id=session_data.channel.id,
                     asterisk_unique_id=session_data.channel.protocol_id,
+                    channel_name=session_data.channel.name,
+                    channel_id=session_data.channel.id,
                     caller_id_name=session_data.channel.caller.number or '',
                     caller_id_number=session_data.channel.caller.name or '',
                     dialed_number=session_data.channel.dialplan.exten or '',
-                    bridge_id=session_data.bridge_id,
                     external_media_channel_id=session_data.external_media_channel_id,
+                    call_type=session_data.call_type,
+                    bridge_id=session_data.bridge_id,
                     rtp_endpoint_host=session_data.rtp_endpoint_host,
                     rtp_endpoint_port=session_data.rtp_endpoint_port,
                     session_metadata=session_data.metadata,
@@ -246,9 +299,10 @@ class SessionManager:
             allowed_fields = set(f.name for f in CallSession._meta.get_fields())
             safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
 
-            if 'metadata' in safe_updates:
-                safe_updates['session_metadata'] = safe_updates.pop('metadata')
+            if 'metadata' in updates:
+                safe_updates['session_metadata'] = updates.pop('metadata')
 
+            logger.info(f"Updating session {sessionId} with updates: {safe_updates}")
             await asyncio.to_thread(
                 lambda: CallSession.objects.filter(
                     asterisk_unique_id=sessionId

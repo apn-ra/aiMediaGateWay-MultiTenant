@@ -13,7 +13,8 @@ from types import TracebackType
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout, TCPConnector
 
-from ari.resources import BridgeResource
+from ari import ChannelResource
+from ari.resources import BridgeResource, ChannelResource
 from ari.config import ARIConfig
 from ari.exceptions import (
     ARIError,
@@ -1060,51 +1061,60 @@ class ARIClient:
         """
         return await self.get(f"/channels/{channel_id}")
 
-    async def originate_call(self, endpoint: str, callerId: str, timeout:int = 30) -> Dict[str, Any]:
-        params = {
-            "endpoint": endpoint,
-            "app": self.config.app_name,
-            "callerId": callerId,
-            "timeout": timeout,
-        }
-
-        return await self.post("/channels", params=params)
 
     async def create_channel(
             self,
             endpoint: str,
+            extension: Optional[str] = None,
+            context: Optional[str] = None,
+            priority: Optional[int] = None,
+            label: Optional[str] = None,
             app: Optional[str] = None,
             app_args: Optional[str] = None,
+            callerId: Optional[str] = None,
+            timeout: Optional[int] = 30,
             channel_id: Optional[str] = None,
             other_channel_id: Optional[str] = None,
             originator: Optional[str] = None,
             formats: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a new channel.
+        """
+        Asynchronously creates a channel with the specified settings and parameters. This function utilizes an HTTP POST
+        request to initiate a channel creation operation with the given configurations.
 
-        Args:
-            endpoint: Channel endpoint (e.g., "SIP/1000")
-            app: Stasis application name (defaults to config.app_name)
-            app_args: Arguments to pass to the application
-            channel_id: Channel ID to use (optional)
-            other_channel_id: Other channel ID for bridging (optional)
-            originator: Channel that originated this call (optional)
-            formats: Allowed media formats (optional)
-
-        Returns:
-            Created channel data dictionary
-
-        Example:
-            ```python
-            async with ARIClient(config) as client:
-                channel = await client.create_channel("SIP/1000")
-                print(f"Created channel: {channel['id']}")
-            ```
+        :param endpoint: The endpoint to use for the channel. Required.
+        :param extension: The extension associated with the channel. Optional.
+        :param context: The dialplan context for the channel. Optional.
+        :param priority: The priority of the channel in the dialplan. Optional.
+        :param label: The label to set for the channel. Optional.
+        :param app: The application to execute on the created channel. Optional.
+        :param app_args: The arguments to pass to the application on the created channel. Optional.
+        :param callerId: The Caller ID to use when creating the channel. Optional.
+        :param timeout: The time in seconds before the request times out. Optional.
+        :param channel_id: Specific ID to assign to the channel being created. Optional.
+        :param other_channel_id: ID of another channel to associate with during creation. Optional.
+        :param originator: The originator of the channel creation request, if applicable. Optional.
+        :param formats: The format(s) to use for the media in the channel. Optional.
+        :return: A dictionary containing the response data from the channel creation request.
+        :rtype: Dict[str, Any]
         """
         params = {
             "endpoint": endpoint,
             "app": app or self.config.app_name,
         }
+
+        if extension:
+            params["extension"] = extension
+        if context:
+            params["context"] = context
+        if priority:
+            params["priority"] = priority
+        if label:
+            params["label"] = label
+        if callerId:
+            params["callerId"] = callerId
+        if timeout:
+            params["timeout"] = timeout
 
         if app_args:
             params["appArgs"] = app_args
@@ -1173,6 +1183,34 @@ class ARIClient:
             params["variables"] = variables
 
         return await self.post("/channels/externalMedia", params=params)
+
+    async def snoop_channel(
+            self,
+            channel_id: str,
+            spy: Optional[str] = None,
+            whisper: Optional[str] = None,
+            app: Optional[str] = None,
+            appArgs: Optional[List[Any]] = None,
+            snoopId: Optional[str] = None
+    ) -> ChannelResource:
+
+        params = {
+            "app": app or self.config.app_name,
+            "channelId": channel_id,
+        }
+
+        if spy:
+            params["spy"] = spy
+
+        if whisper:
+            params["whisper"] = whisper
+        if appArgs:
+            params["appArgs"] = appArgs
+        if snoopId:
+            params["snoopId"] = snoopId
+
+        snoop = await self.post(f"/channels/{channel_id}/snoop", params=params)
+        return ChannelResource(self, snoop)
 
     async def answer_channel(self, channel_id: str) -> None:
         """Answer a channel.

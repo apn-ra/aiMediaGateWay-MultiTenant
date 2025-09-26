@@ -6,7 +6,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from .models import Tenant
-from core.ami.client import AmiClient, get_event_loop
+from core.ami.manager import AmiClient, get_event_loop
 from core.ami.registry import clients
 
 @receiver(post_save, sender=Tenant)

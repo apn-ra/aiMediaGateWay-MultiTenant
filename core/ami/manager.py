@@ -6,7 +6,7 @@ import logging
 import asyncio
 
 from core.models import Tenant
-from core.junie_codes.session import SessionManager, get_session_manager
+from core.session.manager import SessionManager, get_session_manager
 from core.junie_codes.ami.ami_manager import AMIConnectionConfig, ConnectionStats
 from typing import Dict, List, Optional, Any, Callable
 from datetime import timedelta
@@ -57,8 +57,8 @@ class AMIConnection:
         self.stats.last_event_at = timezone.now()
         self.stats.events_processed += 1
 
-        ev = event.get('Event')
-        logger.info(f"Event: {ev}")
+        # ev = event.get('Event')
+        # logger.info(f"Event: {ev}")
 
     def register_event_handler(self, event_type: str, handler: Callable):
         """Register event handler for specific AMI event type."""
