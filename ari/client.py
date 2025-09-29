@@ -1267,7 +1267,7 @@ class ARIClient:
         """
         return await self.get("/bridges")
 
-    async def get_bridge(self, bridge_id: str) -> Dict[str, Any]:
+    async def get_bridge(self, bridge_id: str) -> BridgeResource:
         """Get details for a specific bridge.
 
         Args:
@@ -1279,7 +1279,8 @@ class ARIClient:
         Raises:
             ResourceNotFoundError: If bridge not found
         """
-        return await self.get(f"/bridges/{bridge_id}")
+        bridge = await self.get(f"/bridges/{bridge_id}")
+        return BridgeResource(self, bridge)
 
     async def create_bridge(
             self,

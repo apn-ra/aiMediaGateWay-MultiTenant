@@ -90,7 +90,7 @@ class AMIEventHandler:
                     await bridge.add_channel(em_channel.id)
 
                     await self.session_manager.update_session(sessionId, {
-                        'snoop_channel_id': snoop_channel.id,
+                        'snoop_channel_id': ' ',
                         'external_media_channel_id': em_channel.id
                     })
 

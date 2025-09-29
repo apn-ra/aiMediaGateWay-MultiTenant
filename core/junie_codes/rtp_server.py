@@ -55,6 +55,7 @@ class RTPPacket:
     header: RTPHeader
     payload: bytes
     received_time: datetime
+    local_port: int
     source_address: Tuple[str, int]
     size: int
 
@@ -126,6 +127,17 @@ class DenoiserData:
 
     def __iter__(self):
         return iter(asdict(self).items())
+
+
+@dataclass
+class RTPServerStats:
+    total_packets: int = 0
+    total_bytes: int = 0
+    active_endpoints: int = 0
+    server_start_time: Optional[datetime] = None
+
+    def to_dict(self):
+        return asdict(self)
 
 class AdaptiveAudioBuffer:
     """
@@ -423,7 +435,7 @@ class AudioProcessor:
         self.rnnoise = pyrnnoise.RNNoise(sample_rate=48000)
 
         # WebRTC VAD (aggressiveness 0–3; 3 = most aggressive)
-        self.vad = webrtcvad.Vad(2)
+        self.vad = webrtcvad.Vad(0)
 
         self.conversion_cache: Dict[str, bytes] = {}
 
@@ -515,6 +527,7 @@ class AudioProcessor:
         :rtype: Optional[DenoiserData]
         """
         try:
+
             # Ensure bytes → int16 numpy
             pcm_16k = np.frombuffer(payload, dtype=np.int16)
 
@@ -537,11 +550,17 @@ class AudioProcessor:
             # Process each 10-ms frame
             for i in range(0, len(pcm_48k), frame_size):
                 frame = pcm_48k[i: i + frame_size]
-                if frame and len(frame) < frame_size:
+
+                if len(frame) < frame_size:
                     break  # drop incomplete trailing frame
-                speech_prob, denoised_frame = self.rnnoise.denoise_frame(frame)
-                denoised_frames.append(denoised_frame)
-                speech_probs.append(speech_prob)
+
+                try:
+                    for speech_prob, denoised_frame in self.rnnoise.denoise_chunk(frame):
+                        denoised_frames.append(denoised_frame)
+                        speech_probs.append(speech_prob)
+                except Exception as e:
+                    logger.error(f"Failed to denoise frame: {e}")
+                    return None
 
             if len(denoised_frames) == 0:
                 return None
@@ -552,12 +571,17 @@ class AudioProcessor:
 
             # Downsample back to 16 kHz for VAD / pipeline
             pcm_denoised_16k = resample_poly(pcm_denoised_48k, up=1, down=3).astype(np.int16)
+            if pcm_denoised_16k is None or pcm_denoised_16k.size == 0:
+                logger.warning("Resample returned None or empty array")
+                return None
+
             denoised_bytes = pcm_denoised_16k.tobytes()
 
             # WebRTC VAD (20 ms @ 16 kHz = 320 samples)
             vad_frame_size = 320
             is_speech = False
-            if len(pcm_denoised_16k) >= vad_frame_size:
+
+            if pcm_denoised_16k.size >= vad_frame_size:
                 frame_bytes = pcm_denoised_16k[:vad_frame_size].tobytes()
                 is_speech = self.vad.is_speech(frame_bytes, 16000)
 
@@ -1333,6 +1357,7 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
     def __init__(self, rtp_server):
         packet_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self.audio_buffer = AdaptiveAudioBuffer(queue=packet_queue)
+        self.local_port = 0
         self.rtp_server = rtp_server
         self.transport = None
 
@@ -1341,11 +1366,13 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
         self.transport = transport
         sock = transport.get_extra_info('socket')
         if sock:
+            self.local_port = sock.getsockname()[1]
             logger.info(f"RTP server listening on {sock.getsockname()}")
         asyncio.create_task(self._consumer_task())
 
     def connection_lost(self, exc):
         """Called when RTP socket is closed"""
+        self.local_port = 0
         asyncio.create_task(self.audio_buffer.queue.put(None))
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
@@ -1354,6 +1381,7 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
             # Parse RTP packet
             packet = self._parse_rtp_packet(data, addr)
             if packet:
+                # asyncio.create_task(self.rtp_server.process_rtp_packet(packet))
                 self.audio_buffer.add_packet(packet)
         except Exception as e:
             logger.error(f"Error processing RTP packet from {addr}: {e}")
@@ -1379,12 +1407,14 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 await self.rtp_server.process_rtp_packet(packet)
                 self.audio_buffer.queue.task_done()
         except asyncio.CancelledError:
+            logger.debug("RTP server consumer task cancelled")
             pass
 
-    @staticmethod
-    def _parse_rtp_packet(data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
+
+    def _parse_rtp_packet(self, data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
         """Parse raw UDP data into RTP packet structure"""
         try:
+
             if len(data) < 12:  # Minimum RTP header size
                 logger.warning(f"RTP packet too small from {addr}: {len(data)} bytes")
                 return None
@@ -1459,6 +1489,7 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
                 header=header,
                 payload=payload,
                 received_time=timezone.now(),
+                local_port=self.local_port,
                 source_address=addr,
                 size=len(data)
             )
@@ -1487,15 +1518,9 @@ class RTPServer:
         self.session_endpoints: Dict[str, RTPEndpoint] = {}  # session_id -> endpoint
         self.servers: Dict[int, Tuple[asyncio.DatagramTransport, RTPServerProtocol]] = {}
         self.session_manager = get_session_manager()
-        self.packet_handlers: List[Callable[[RTPPacket, RTPEndpoint], None]] = []
-        self.session_id = None
+        self.packet_handlers: Dict[str, any] = {}
 
-        self.statistics = {
-            'total_packets': 0,
-            'total_bytes': 0,
-            'active_endpoints': 0,
-            'server_start_time': None
-        }
+        self.statistics = RTPServerStats()
         self._lock = asyncio.Lock()
         logger.info("RTP Server initialized")
 
@@ -1504,7 +1529,7 @@ class RTPServer:
                               codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint for a session"""
         try:
-            self.session_id = session_id
+
             async with self._lock:
                 # Validate codec
                 if not AudioCodec.validate_codec(codec):
@@ -1536,7 +1561,7 @@ class RTPServer:
                 # Register endpoint
                 self.endpoints[local_port] = endpoint
                 self.session_endpoints[session_id] = endpoint
-                self.statistics['active_endpoints'] += 1
+                self.statistics.active_endpoints += 1
 
                 logger.info(f"Created RTP endpoint for session {session_id} on port {local_port}")
                 return endpoint
@@ -1598,13 +1623,16 @@ class RTPServer:
         """Process incoming RTP packet"""
         try:
             # Find endpoint by source port (assuming standard port mapping)
+            source_address = packet.source_address[0]
+            local_port = int(packet.local_port)
             endpoint = None
 
-            if self.session_endpoints[self.session_id].remote_host == packet.source_address[0]:
-                endpoint = self.session_endpoints[self.session_id]
+            if local_port in self.endpoints and self.endpoints[local_port].remote_host == source_address:
+                endpoint = self.endpoints[local_port]
 
             if not endpoint:
-                logger.debug(f"No endpoint found for packet from {packet.source_address}")
+                logger.debug(f"No available ports for tenant {local_port}")
+                logger.debug(f"No endpoint found for packet from {source_address}")
                 return
 
             # Update endpoint statistics
@@ -1613,8 +1641,8 @@ class RTPServer:
             endpoint.last_packet_time = packet.received_time
 
             # Update global statistics
-            self.statistics['total_packets'] += 1
-            self.statistics['total_bytes'] += packet.size
+            self.statistics.total_packets += 1
+            self.statistics.total_bytes += packet.size
 
             # Validate codec
             codec_info = AudioCodec.get_codec_info(packet.header.payload_type)
@@ -1628,7 +1656,7 @@ class RTPServer:
             endpoint.channels = codec_info['channels']
 
             # Call registered packet handlers
-            for handler in self.packet_handlers:
+            for handler in self.packet_handlers[endpoint.session_id]:
                 try:
                     await handler(packet, endpoint)
                 except Exception as e:
@@ -1664,21 +1692,23 @@ class RTPServer:
                 if session_id in self.session_endpoints:
                     del self.session_endpoints[session_id]
 
-                self.statistics['active_endpoints'] -= 1
+                self.statistics.active_endpoints -= 1
 
                 logger.info(f"Removed RTP endpoint for session {session_id} on port {port}")
 
         except Exception as e:
             logger.error(f"Error removing RTP endpoint: {e}")
 
-    def register_packet_handler(self, handler: Callable[[RTPPacket, RTPEndpoint], None]):
+    def register_packet_handler(self, session_id, handler: Callable[[RTPPacket, RTPEndpoint], None]):
         """Register a handler for processed RTP packets"""
-        self.packet_handlers.append(handler)
+        if session_id not in self.packet_handlers:
+            self.packet_handlers[session_id] = [] #List[Callable[[RTPPacket, RTPEndpoint], None]]
+        self.packet_handlers[session_id].append(handler)
         logger.info(f"Registered RTP packet handler: {handler.__name__}")
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get server statistics"""
-        stats = self.statistics.copy()
+        stats = self.statistics.to_dict().copy()
         stats['active_endpoints'] = len(self.endpoints)
         if stats['server_start_time']:
             uptime = (timezone.now() - stats['server_start_time']).total_seconds()
@@ -1688,7 +1718,7 @@ class RTPServer:
     async def start(self):
         """Start the RTP server"""
         try:
-            self.statistics['server_start_time'] = timezone.now()
+            self.statistics.server_start_time = timezone.now()
             logger.info("RTP Server started successfully")
 
         except Exception as e:

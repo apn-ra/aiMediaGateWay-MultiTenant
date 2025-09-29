@@ -241,7 +241,9 @@ class RTPSessionIntegrator:
                 logger.debug(f"Session {session_id} not integrated with RTP")
                 return True
 
-            logger.info(f"Integration Status: {await self.get_integration_status(session_id)}")
+            session = await self.session_manager.get_session(session_id)
+            logger.info(f"Channel Name: {session.channel.name}")
+            logger.info(f"Integration Status: {await self.get_integration_status(session_id)}\n\n")
 
             integration_data = self.active_integrations[session_id]
             
@@ -304,54 +306,56 @@ class RTPSessionIntegrator:
             async def comprehensive_packet_handler(packet, endpoint):
                 """Handle RTP packet for all audio processing functionalities"""
                 try:
-                    if endpoint.session_id != session_id:
-                        return
-                        
+
                     # Update integration stats
-                    if session_id in self.active_integrations:
-                        stats = self.active_integrations[session_id]['stats']
+                    if endpoint.session_id in self.active_integrations:
+                        stats = self.active_integrations[endpoint.session_id]['stats']
                         stats['packets_processed'] += 1
                         stats['bytes_processed'] += packet.size
                     
-                    # Convert RTP packet to AudioFrame for audio processing
-                    audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
-                    if not audio_frame:
-                        return
-                    
-                    # 1. Quality Monitoring
-                    quality_monitor = integration_data.get('quality_monitor')
-                    if quality_monitor:
-                        quality_monitor.update_with_packet(packet)
+                        # Convert RTP packet to AudioFrame for audio processing
+                        audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
+                        if not audio_frame:
+                            return
 
-                    if audio_frame.is_speech:
-                        logger.debug(f"Audio frame avg speech prob: {audio_frame.avg_speech_prob}")
+                        # Quality Monitoring
+                        quality_monitor = self.active_integrations[endpoint.session_id].get('quality_monitor')
+                        if quality_monitor:
+                            quality_monitor.update_with_packet(packet)
 
-                    # Additional quality analysis
-                    audio_quality_analyzer = integration_data.get('audio_quality_analyzer')
-                    if audio_quality_analyzer:
-                        self.quality_manager.add_audio_frame(session_id, audio_frame)
-                    
-                    # 2. Audio Streaming
-                    # if integration_data.get('audio_streaming_registered'):
-                    #     await self.streaming_manager.stream_audio_frame(session_id, audio_frame)
-                    
-                    # 3. Audio Recording
-                    # if integration_data.get('audio_recording_started'):
-                    #     await self.recording_manager.add_audio_frame(session_id, audio_frame)
-                    
-                    # 4. Audio Transcription (process audio frame for transcription)
-                    # if integration_data.get('audio_transcription_started'):
-                    #     # Note: Transcription typically works with accumulated audio data
-                    #     # This might need buffering or periodic processing
-                    #     await self._process_audio_for_transcription(session_id, audio_frame)
-                        
+                        # logger.debug(f"VAD: {audio_frame.is_speech} for session {endpoint.session_id}")
+
+                        # if audio_frame.is_speech:
+                        #     logger.debug(f"Audio frame avg speech prob: {audio_frame.avg_speech_prob}")
+
+                        # Additional quality analysis
+                        # audio_quality_analyzer = self.active_integrations[endpoint.session_id].get('audio_quality_analyzer')
+                        # if audio_quality_analyzer:
+                        #     self.quality_manager.add_audio_frame(session_id, audio_frame)
+
+                        # 2. Audio Streaming
+                        # if integration_data.get('audio_streaming_registered'):
+                        #     await self.streaming_manager.stream_audio_frame(session_id, audio_frame)
+
+                        # 3. Audio Recording
+                        # if integration_data.get('audio_recording_started'):
+                        #     await self.recording_manager.add_audio_frame(session_id, audio_frame)
+
+                        # 4. Audio Transcription (process audio frame for transcription)
+                        # if integration_data.get('audio_transcription_started'):
+                        #     # Note: Transcription typically works with accumulated audio data
+                        #     # This might need buffering or periodic processing
+                        #     await self._process_audio_for_transcription(session_id, audio_frame)
+                    else:
+                        logger.debug(f"Session ID: {endpoint.session_id} not on active integration")
+
                 except Exception as e:
                     logger.error(f"Error in comprehensive packet handler for session {session_id}: {e}")
                     if session_id in self.active_integrations:
                         self.active_integrations[session_id]['stats']['errors'] += 1
             
             # Register the comprehensive handler with RTP server
-            self.rtp_server.register_packet_handler(comprehensive_packet_handler)
+            self.rtp_server.register_packet_handler(session_id=session_id, handler=comprehensive_packet_handler)
             logger.info(f"Registered comprehensive packet handler for session {session_id}")
             
         except Exception as e:
