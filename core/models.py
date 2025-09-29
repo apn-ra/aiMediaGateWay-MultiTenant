@@ -70,6 +70,7 @@ class CallSession(models.Model):
     direction = models.CharField(max_length=10, choices=CALL_DIRECTION_CHOICES)
     status = models.CharField(max_length=20, choices=SESSION_STATUS_CHOICES, default='detected')
     bridge_id = models.CharField(max_length=255, null=True, blank=True)
+    snoop_channel_id = models.CharField(max_length=255, null=True, blank=True)
     external_media_channel_id = models.CharField(max_length=255, null=True, blank=True)
     rtp_endpoint_host = models.CharField(max_length=255, null=True, blank=True)
     rtp_endpoint_port = models.IntegerField(null=True, blank=True)

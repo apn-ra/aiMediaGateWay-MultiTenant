@@ -4,15 +4,10 @@
 import logging
 import asyncio
 
-from numpy.random.tests.test_generator_mt19937 import endpoint
-
 logger = logging.getLogger(__name__)
 
-from decouple import config
 from core.session.manager import get_session_manager
 from core.ari.manager import get_ari_manager, ARIConnection
-from core.junie_codes.rtp_integration import get_rtp_integrator
-from django.utils import timezone
 
 class ARIEventHandler:
 
@@ -36,10 +31,7 @@ class ARIEventHandler:
         """Initialize the event handler with managers."""
         self.session_manager = get_session_manager()
         self.ari_manager = get_ari_manager()
-        # self.rtp_integrator = get_rtp_integrator()
         self.tenant_id = tenant_id
-
-        # await self.rtp_integrator.start()
 
     async def register_handlers(self, tenant_id: int) -> ARIConnection:
         """Register all event handlers for a specific tenant."""
@@ -52,18 +44,6 @@ class ARIEventHandler:
         await self.ari_manager.register_event_handler(
             tenant_id, 'StasisEnd', self.handle_StasisEnd
         )
-
-        # await self.ari_manager.register_event_handler(
-        #     tenant_id, 'Dial', self.handle_dial
-        # )
-
-        # await self.ari_manager.register_event_handler(
-        #     tenant_id, 'ChannelDestroyed', self.handle_channel_state_change
-        # )
-
-        # await self.ari_manager.register_event_handler(
-        #     tenant_id, 'ChannelStateChange', self.handle_channel_state_change
-        # )
 
         return self.ari_manager.connections[tenant_id]
 
@@ -82,21 +62,12 @@ class ARIEventHandler:
         """Handle StasisStart events."""
         channel = event_data['channel']
         channel_id = channel['id']
-
-        client = self.ari_manager.connections[self.tenant_id].client
-
-        logger.info(f"StasisStart Event Data: {event_data}")
-
+        # logger.info(f"Received StasisStart {event_data}")
 
     async def handle_StasisEnd(self, event_data):
         """Handle StasisEnd events."""
         channel = event_data['channel']
-        sessionId = channel['protocol_id']
         channel_id = channel['id']
-
-        client = self.ari_manager.connections[self.tenant_id].client
-
-        logger.info(f"StasisEnd Event Data: {event_data}")
 
     async def _delayed_session_cleanup(self, session_id: str, delay: int = 300):
         """Clean up session after a delay."""

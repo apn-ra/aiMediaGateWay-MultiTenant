@@ -69,6 +69,8 @@ class Command(BaseCommand):
 
             await event_handler.ami_manager.disconnect_all()
             logger.info("AMI event listener stopped.")
+            await event_handler.rtp_integrator.stop()
+            logger.info("RTP Integrator stopped.")
             await event_handler.ari_event_handler.ari_manager.disconnect_all()
             logger.info("ARI event listener stopped.")
 

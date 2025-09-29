@@ -101,10 +101,11 @@ class ARIConnection:
                     self.health_check_task.cancel()
 
                 # Close ARI connection
-                if self.client:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: self.client.close()
-                    )
+                if self.client.is_connected:
+                    await self.client.close()
+                    # await asyncio.get_event_loop().run_in_executor(
+                    #     None, lambda: self.client.close()
+                    # )
                     self.client = None
 
                 self.stats.connected = False

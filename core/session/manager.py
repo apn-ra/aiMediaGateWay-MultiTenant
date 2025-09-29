@@ -69,6 +69,7 @@ class CallSessionData:
     status: str = 'detected'
     duration: Optional[int] = 0
     bridge_id: Optional[str] = None
+    snoop_channel_id: Optional[str] = None
     external_media_channel_id: Optional[str] = None
     rtp_endpoint_host: Optional[str] = None
     rtp_endpoint_port: Optional[int] = None
@@ -199,7 +200,7 @@ class SessionManager:
                 asterisk_id=event_data['asterisk_id'],
                 asterisk_host=event_data['asterisk_host'],
                 rtp_endpoint_host=event_data['rtp_endpoint_host'],
-                direction='inbound' if self._is_inbound_channel(channel.name) else 'outbound',
+                direction='outbound' if self.is_inbound_channel(channel.name) else 'inbound',
                 ari_control= True,
                 channel=channel,
                 status='answered',
@@ -208,7 +209,7 @@ class SessionManager:
         return None
 
     @staticmethod
-    def _is_inbound_channel(channel: str) -> bool:
+    def is_inbound_channel(channel: str) -> bool:
         """Determine if a channel represents an inbound call."""
         # This is a simplified heuristic - in production, you'd use
         # more sophisticated logic based on your Asterisk configuration
@@ -222,8 +223,8 @@ class SessionManager:
             if tech in inbound_technologies:
                 return True
 
-        # Default to inbound for unknown channels
-        return True
+        # Default to Outbound for unknown channels
+        return False
 
     async def create_session(self, session_data: CallSessionData, store_database: bool = True) -> str:
         """
@@ -276,6 +277,7 @@ class SessionManager:
                     caller_id_name=session_data.channel.caller.number or '',
                     caller_id_number=session_data.channel.caller.name or '',
                     dialed_number=session_data.channel.dialplan.exten or '',
+                    snoop_channel_id=session_data.snoop_channel_id,
                     external_media_channel_id=session_data.external_media_channel_id,
                     call_type=session_data.call_type,
                     bridge_id=session_data.bridge_id,
@@ -302,7 +304,7 @@ class SessionManager:
             if 'metadata' in updates:
                 safe_updates['session_metadata'] = updates.pop('metadata')
 
-            logger.info(f"Updating session {sessionId} with updates: {safe_updates}")
+            # logger.info(f"Updating session {sessionId} with updates: {safe_updates}")
             await asyncio.to_thread(
                 lambda: CallSession.objects.filter(
                     asterisk_unique_id=sessionId

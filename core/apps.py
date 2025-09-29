@@ -1,5 +1,5 @@
 from django.apps import AppConfig
-from core.ami.loop_holder import start_loop, loop
+# from core.ami.loop_holder import start_loop, loop
 
 class CoreConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"

@@ -15,13 +15,18 @@ import asyncio
 import logging
 import struct
 import socket
-from typing import Dict, List, Optional, Any, Callable, Tuple
-from dataclasses import dataclass, field
+import time
+from typing import Dict, List, Optional, Any, Callable, Tuple, Coroutine
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from django.utils import timezone
 from django.conf import settings
+from scipy.signal import resample_poly
 import collections
 import numpy as np
+import webrtcvad
+import pyrnnoise
+
 
 from core.models import Tenant
 from core.session.manager import get_session_manager
@@ -75,12 +80,189 @@ class RTPEndpoint:
 @dataclass
 class AudioFrame:
     """Processed audio frame ready for streaming"""
-    sequence_number: int
-    timestamp: int
     payload: bytes
+    timestamp: int
+    sequence_number: int
     codec: str
+    sample_rate: int
     processed_time: datetime
+    channels: int
+    session_id: str
     original_packet: Optional[RTPPacket] = None
+    is_speech:bool = False
+    avg_speech_prob: float = 0.0
+
+
+@dataclass
+class AudioBufferStats:
+    """Audio buffer statistics"""
+    packets_buffered: int = 0
+    packets_dropped: int = 0
+    packets_played: int = 0
+    jitter_ms: float = 0.0
+
+    def to_dict(self):
+        return asdict(self)
+
+@dataclass
+class AudioProcessorStats:
+    """Audio processor statistics"""
+    frames_processed: int = 0
+    total_bytes_processed: int = 0
+    conversion_errors: int = 0
+    vad_voiced_frames: int = 0
+    vad_silence_frames: int = 0
+    rnnoise_avg_speech_prob: float = 0.0
+
+    def to_dict(self):
+        return asdict(self)
+
+@dataclass
+class DenoiserData:
+    """Denoiser data structure"""
+    denoised_bytes: bytes
+    avg_speech_prob: float = 0.0
+    is_speech:bool = False
+
+    def __iter__(self):
+        return iter(asdict(self).items())
+
+class AdaptiveAudioBuffer:
+    """
+    Adaptive jitter buffer using asyncio.Queue.
+    - Buffers RTP packets based on sequence number
+    - Maintains adaptive playout delay based on observed jitter
+    - Pushes ready packets into an asyncio.Queue for downstream consumption
+    """
+
+    def __init__(
+        self,
+        queue: asyncio.Queue,
+        target_delay_ms: int = 50,
+        max_delay_ms: int = 200,
+        buffer_size: int = 50,
+        late_threshold: int = 10,
+    ):
+        self.last_transit = None
+        self.queue = queue
+        self.buffer_size = buffer_size
+        self.late_threshold = late_threshold
+
+        # Adaptive delay parameters
+        self.target_delay_ms = target_delay_ms
+        self.max_delay_ms = max_delay_ms
+        self.playout_delay_ms = target_delay_ms
+
+        # Packet storage
+        self.packets: Dict[int, RTPPacket] = {}
+        self.arrival_times: Dict[int, float] = {}
+
+        # Stats
+        self.stats = AudioBufferStats()
+
+        self.last_seq: Optional[int] = None
+        self.base_time = time.monotonic()
+
+    # ---- RTP packet management ----
+    def add_packet(self, packet: RTPPacket) -> None:
+        """
+        Add a new RTP packet to the buffer while handling duplicates, late packets,
+        and buffer overflow conditions. Also updates jitter statistics and attempts
+        to release packets that are ready for processing in the correct sequence.
+
+        :param packet: The RTPPacket to add to the buffer.
+        :type packet: RTPPacket
+        :return: None
+        """
+        now = time.monotonic()
+        seq = packet.header.sequence_number
+
+        if seq in self.packets:
+            return  # Duplicate
+
+        # Drop very late packets
+        if self.last_seq is not None and self._seq_diff(seq, self.last_seq) < -self.late_threshold:
+            self.stats.packets_dropped += 1
+            return
+
+        # Buffer overflow protection
+        if len(self.packets) >= self.buffer_size:
+            # Drop the packet furthest in time, not just min()
+            oldest_seq = min(self.packets.keys(),
+                             key=lambda s: self._seq_diff(s, self.last_seq or s))
+            self.packets.pop(oldest_seq, None)
+            self.arrival_times.pop(oldest_seq, None)
+            self.stats.packets_dropped += 1
+
+        self.packets[seq] = packet
+        self.arrival_times[seq] = now
+        self.stats.packets_buffered += 1
+        self._update_jitter(arrival_time=now, rtp_timestamp=packet.header.timestamp)
+
+        # Attempt to release packets in order
+        self._release_ready_packets(now)
+
+    def _release_ready_packets(self, now: float) -> None:
+        """
+        Release packets that are older than current adaptive playout delay.
+        """
+        for seq in sorted(self.packets.keys()):
+            if (now - self.arrival_times[seq]) * 1000 >= self.playout_delay_ms:
+                pkt = self.packets.pop(seq)
+                self.arrival_times.pop(seq, None)
+                self.last_seq = seq
+                self.stats.packets_played += 1
+                # Push to consumer queue (non-blocking)
+                try:
+                    self.queue.put_nowait(pkt)
+                except asyncio.QueueFull:
+                    self.stats.packets_dropped += 1
+            else:
+                break  # Stop once we reach a packet that is too fresh
+
+    @staticmethod
+    def _seq_diff(a: int, b: int) -> int:
+        """Sequence number difference with wraparound."""
+        return ((a - b + 32768) % 65536) - 32768
+
+    def _update_jitter(self, arrival_time: float, rtp_timestamp: int, clock_rate: int = 8000) -> None:
+        """
+        Updates the jitter calculation based on the arrival time, RTP timestamp, and the clock rate
+        of the media. This method estimates the inter-arrival jitter for RTP packets following
+        the guidelines specified in RFC 3550. It also optionally adjusts the playout delay
+        dynamically based on calculated jitter and other parameters.
+
+        :param arrival_time: The time (in seconds) the packet arrived at the receiver.
+        :param rtp_timestamp: The RTP timestamp from the packet which corresponds to the
+            sampling instant of the first octet in the RTP payload.
+        :param clock_rate: The clock rate (in Hz) used by the media. Defaults to 8000.
+
+        :return: None
+        """
+        if self.last_seq is None or self.last_transit is None:
+            # First packet—initialize
+            self.last_transit = arrival_time - (rtp_timestamp / clock_rate)
+            self.stats.jitter_ms = 0.0
+            return
+
+        transit = arrival_time - (rtp_timestamp / clock_rate)
+        d = abs(transit - self.last_transit) * 1000.0  # convert to ms
+        self.last_transit = transit
+
+        # RFC 3550 smoothing
+        # Fast attack, slow decay
+        if d > self.stats.jitter_ms:
+            alpha = 0.25  # attack
+        else:
+            alpha = 0.0625  # decay
+        self.stats.jitter_ms += (d - self.stats.jitter_ms) * alpha
+
+        # Optional: adapt playout delay
+        new_delay = self.target_delay_ms + min(self.stats.jitter_ms, self.max_delay_ms)
+        self.playout_delay_ms = 0.9 * self.playout_delay_ms + 0.1 * new_delay
+
+    def get_stats(self) -> Dict:
+        return self.stats.to_dict()
 
 
 class AudioBuffer:
@@ -98,7 +280,7 @@ class AudioBuffer:
         self.buffer_size = buffer_size
         self.max_delay_ms = max_delay_ms
         self.packets: Dict[int, RTPPacket] = {}  # seq_num -> packet
-        self.expected_seq = 0
+        self.expected_seq = None
         self.last_processed_seq = -1
         self.buffer_start_time = None
         self.stats = {
@@ -114,7 +296,7 @@ class AudioBuffer:
             seq_num = packet.header.sequence_number
 
             # Handle sequence number wraparound
-            if self.expected_seq == 0:
+            if self.expected_seq is None:
                 self.expected_seq = seq_num
 
             # Check if packet is too late
@@ -148,7 +330,7 @@ class AudioBuffer:
 
             # Start buffering timing if first packet
             if self.buffer_start_time is None and self.packets:
-                self.buffer_start_time = timezone.now()
+                self.buffer_start_time = time.monotonic()
 
             # Check if we should start processing (minimum buffering delay)
             if not self._is_ready_to_process():
@@ -212,7 +394,7 @@ class AudioBuffer:
             return False
 
         # Wait for minimum buffer time
-        elapsed_ms = (timezone.now() - self.buffer_start_time).total_seconds() * 1000
+        elapsed_ms = (time.monotonic() - self.buffer_start_time).total_seconds() * 1000
         return elapsed_ms >= (self.max_delay_ms / 4)  # Start at 25% of max delay
 
     def get_stats(self) -> Dict[str, Any]:
@@ -237,14 +419,18 @@ class AudioProcessor:
     """
 
     def __init__(self):
-        self.conversion_cache: Dict[str, bytes] = {}
-        self.stats = {
-            'frames_processed': 0,
-            'conversion_errors': 0,
-            'total_bytes_processed': 0
-        }
+        # RNNoise for denoising
+        self.rnnoise = pyrnnoise.RNNoise(sample_rate=48000)
 
-    async def process_packet(self, packet: RTPPacket, target_codec: str = None) -> Optional[AudioFrame]:
+        # WebRTC VAD (aggressiveness 0–3; 3 = most aggressive)
+        self.vad = webrtcvad.Vad(2)
+
+        self.conversion_cache: Dict[str, bytes] = {}
+
+        # Stats
+        self.stats = AudioProcessorStats()
+
+    async def process_packet(self, packet: RTPPacket, endpoint: RTPEndpoint, target_codec: str = None) -> Optional[AudioFrame]:
         """Process RTP packet into audio frame"""
         try:
             # Get codec information
@@ -261,28 +447,143 @@ class AudioProcessor:
                 packet.payload, source_codec, target_codec
             )
 
-            if processed_payload is None:
+            if not processed_payload:
+                logger.warning(f"Failed to convert payload type {packet.header.payload_type}")
                 return None
 
-            # Create audio frame
+            #Normalize audio level
+            payload = self.normalize_audio_level(payload=processed_payload, target_level=0.1)
+
+            #Denoise and VAD
+            data = await self._denoise_payload(payload=payload)
+
+            if not data:
+                logger.warning(f"Failed to denoise payload type {packet.header.payload_type}")
+                return None
+
+            if not data.denoised_bytes:
+                logger.warning("Denoised bytes is empty or None")
+                return None
+
+            # Create AudioFrame for downstream processing
             frame = AudioFrame(
                 sequence_number=packet.header.sequence_number,
                 timestamp=packet.header.timestamp,
-                payload=processed_payload,
+                payload=data.denoised_bytes,
                 codec=target_codec,
                 processed_time=timezone.now(),
-                original_packet=packet
+                sample_rate=endpoint.sample_rate,
+                channels=endpoint.channels,
+                session_id=endpoint.session_id,
+                original_packet=packet,
+                is_speech=data.is_speech,
+                avg_speech_prob=data.avg_speech_prob,
             )
 
-            # Update statistics
-            self.stats['frames_processed'] += 1
-            self.stats['total_bytes_processed'] += len(processed_payload)
+            # General stats
+            self.stats.frames_processed += 1
+            self.stats.total_bytes_processed += len(data.denoised_bytes)
 
             return frame
-
         except Exception as e:
             logger.error(f"Error processing audio packet: {e}")
-            self.stats['conversion_errors'] += 1
+            self.stats.conversion_errors += 1
+
+            return None
+
+
+    async def _denoise_payload(self, payload: bytes) ->  Optional[DenoiserData]:
+        """
+        Processes the given audio payload by denoising and analyzing it. The function
+        utilizes RNNoise for noise reduction, calculates the speech probability for each
+        frame, and performs voice activity detection (VAD) using WebRTC.
+
+        The payload is first converted from bytes into a 16-bit PCM audio format and
+        upsampled to 48 kHz for compatibility with the RNNoise library. It processes
+        each frame of audio to remove noise, calculates the probability of speech for the
+        frames, and adjusts audio back to a 16 kHz format for further analysis. The
+        results also include whether the processed audio contains speech based on VAD output.
+
+        If the entire processing chain completes successfully, it returns an object
+        containing the denoised audio bytes, a boolean indicating speech presence, and the
+        average speech probability for the processed interval.
+
+        :param payload: Raw audio data in bytes that represents PCM audio at 16 kHz sample rate.
+        :type payload: bytes
+        :return: An optional object holding the denoised audio bytes, a boolean flag indicating
+                 speech presence, and the average speech probability, or `None` if processing fails.
+        :rtype: Optional[DenoiserData]
+        """
+        try:
+            # Ensure bytes → int16 numpy
+            pcm_16k = np.frombuffer(payload, dtype=np.int16)
+
+            if pcm_16k.size == 0:
+                logger.warning("Empty PCM16k buffer")
+                return None
+
+            # Upsample to 48 kHz for RNNoise
+            pcm_48k = resample_poly(pcm_16k, up=3, down=1).astype(np.float32)
+            if pcm_48k is None or pcm_48k.size == 0:
+                logger.warning("Resample returned None or empty array")
+                return None
+
+            pcm_48k = pcm_48k.astype(np.float32) / 32768.0
+
+            frame_size = 480  # 480 samples = 10 ms at 48 kHz
+            denoised_frames = []
+            speech_probs = []
+
+            # Process each 10-ms frame
+            for i in range(0, len(pcm_48k), frame_size):
+                frame = pcm_48k[i: i + frame_size]
+                if frame and len(frame) < frame_size:
+                    break  # drop incomplete trailing frame
+                speech_prob, denoised_frame = self.rnnoise.denoise_frame(frame)
+                denoised_frames.append(denoised_frame)
+                speech_probs.append(speech_prob)
+
+            if len(denoised_frames) == 0:
+                return None
+
+            # Concatenate and convert back to int16
+            denoised_48k = np.concatenate(denoised_frames)
+            pcm_denoised_48k = (denoised_48k * 32768.0).astype(np.int16)
+
+            # Downsample back to 16 kHz for VAD / pipeline
+            pcm_denoised_16k = resample_poly(pcm_denoised_48k, up=1, down=3).astype(np.int16)
+            denoised_bytes = pcm_denoised_16k.tobytes()
+
+            # WebRTC VAD (20 ms @ 16 kHz = 320 samples)
+            vad_frame_size = 320
+            is_speech = False
+            if len(pcm_denoised_16k) >= vad_frame_size:
+                frame_bytes = pcm_denoised_16k[:vad_frame_size].tobytes()
+                is_speech = self.vad.is_speech(frame_bytes, 16000)
+
+            # Update stats
+            self.stats.vad_voiced_frames = 0
+            self.stats.vad_silence_frames = 0
+            self.stats.rnnoise_avg_speech_prob = 0.0
+            self.stats.rnnoise_frame_count = 0
+
+            # Running average of RNNoise speech probability
+            avg_prob = 0.0
+            if speech_probs:
+                avg_prob = float(np.mean(speech_probs))
+                c = self.stats.rnnoise_frame_count
+                self.stats.rnnoise_avg_speech_prob = (
+                        (self.stats.rnnoise_avg_speech_prob * c + avg_prob) / (c + 1)
+                )
+                self.stats.rnnoise_frame_count += 1
+
+            return DenoiserData(
+                denoised_bytes=denoised_bytes,
+                is_speech=is_speech,
+                avg_speech_prob=avg_prob,
+            )
+        except Exception as e:
+            logger.error(f"Error denoising payload: {e}")
             return None
 
     async def _convert_audio_format(self, payload: bytes, source_codec: str, target_codec: str) -> Optional[bytes]:
@@ -349,7 +650,8 @@ class AudioProcessor:
             logger.error(f"Error normalizing audio level: {e}")
             return payload
 
-    def _ulaw2lin(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _ulaw2lin(payload: bytes) -> bytes:
         """Convert μ-law encoded audio to linear PCM using numpy"""
         try:
             # Convert bytes to numpy array of uint8
@@ -379,7 +681,8 @@ class AudioProcessor:
             logger.error(f"Error in ulaw2lin conversion: {e}")
             return payload
 
-    def _alaw2lin(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _alaw2lin(payload: bytes) -> bytes:
         """Convert A-law encoded audio to linear PCM using numpy"""
         try:
             # Convert bytes to numpy array of uint8
@@ -411,7 +714,8 @@ class AudioProcessor:
             logger.error(f"Error in alaw2lin conversion: {e}")
             return payload
 
-    def _lin2ulaw(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _lin2ulaw(payload: bytes) -> bytes:
         """Convert linear PCM to μ-law encoded audio using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -450,7 +754,8 @@ class AudioProcessor:
             logger.error(f"Error in lin2ulaw conversion: {e}")
             return payload
 
-    def _lin2alaw(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _lin2alaw(payload: bytes) -> bytes:
         """Convert linear PCM to A-law encoded audio using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -486,7 +791,8 @@ class AudioProcessor:
             logger.error(f"Error in lin2alaw conversion: {e}")
             return payload
 
-    def _slin16_to_lin(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _slin16_to_lin(payload: bytes) -> bytes:
         """Convert SLIN16 (16kHz, 16-bit) to linear PCM (8kHz, 16-bit) using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -502,7 +808,8 @@ class AudioProcessor:
             logger.error(f"Error in slin16_to_lin conversion: {e}")
             return payload
 
-    def _lin_to_slin16(self, payload: bytes) -> bytes:
+    @staticmethod
+    def _lin_to_slin16(payload: bytes) -> bytes:
         """Convert linear PCM (8kHz, 16-bit) to SLIN16 (16kHz, 16-bit) using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -518,7 +825,8 @@ class AudioProcessor:
             logger.error(f"Error in lin_to_slin16 conversion: {e}")
             return payload
 
-    def _calculate_rms(self, payload: bytes) -> float:
+    @staticmethod
+    def _calculate_rms(payload: bytes) -> float:
         """Calculate RMS (Root Mean Square) value of audio data using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -533,7 +841,8 @@ class AudioProcessor:
             logger.error(f"Error calculating RMS: {e}")
             return 0.0
 
-    def _multiply_audio(self, payload: bytes, scale_factor: float) -> bytes:
+    @staticmethod
+    def _multiply_audio(payload: bytes, scale_factor: float) -> bytes:
         """Multiply audio samples by scale factor using numpy"""
         try:
             # Convert bytes to numpy array of int16
@@ -554,7 +863,7 @@ class AudioProcessor:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
-        return self.stats.copy()
+        return self.stats.to_dict()
 
 
 class RTPQualityMonitor:
@@ -1001,7 +1310,7 @@ class AudioCodec:
         'gsm': {'payload_type': 3, 'sample_rate': 8000, 'channels': 1},
         'g722': {'payload_type': 9, 'sample_rate': 16000, 'channels': 1},
         'l16': {'payload_type': 10, 'sample_rate': 44100, 'channels': 2},
-        'slin16': {'payload_type': 11, 'sample_rate': 16000, 'channels': 1},
+        'slin16' : {'payload_type': 118, 'sample_rate': 16000, 'channels': 1}
     }
 
     @classmethod
@@ -1022,6 +1331,8 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
     """UDP protocol handler for RTP packets"""
 
     def __init__(self, rtp_server):
+        packet_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self.audio_buffer = AdaptiveAudioBuffer(queue=packet_queue)
         self.rtp_server = rtp_server
         self.transport = None
 
@@ -1031,6 +1342,11 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
         sock = transport.get_extra_info('socket')
         if sock:
             logger.info(f"RTP server listening on {sock.getsockname()}")
+        asyncio.create_task(self._consumer_task())
+
+    def connection_lost(self, exc):
+        """Called when RTP socket is closed"""
+        asyncio.create_task(self.audio_buffer.queue.put(None))
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         """Handle incoming RTP packets"""
@@ -1038,12 +1354,35 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
             # Parse RTP packet
             packet = self._parse_rtp_packet(data, addr)
             if packet:
-                # Process packet asynchronously
-                asyncio.create_task(self.rtp_server.process_rtp_packet(packet))
+                self.audio_buffer.add_packet(packet)
         except Exception as e:
             logger.error(f"Error processing RTP packet from {addr}: {e}")
 
-    def _parse_rtp_packet(self, data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
+
+    async def _consumer_task(self):
+        """
+        Consumes packets from the given queue and processes them asynchronously.
+
+        This coroutine continuously retrieves packets from the provided async queue
+        as long as the `active` attribute is set to True. Each packet is then
+        processed by creating a new task to handle it with the `process_rtp_packet`
+        method of the `rtp_server`.
+
+        :return: None
+        """
+
+        try:
+            while True:
+                packet = await self.audio_buffer.queue.get()
+                if packet is None:  # sentinel for shutdown
+                    break
+                await self.rtp_server.process_rtp_packet(packet)
+                self.audio_buffer.queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
+    @staticmethod
+    def _parse_rtp_packet(data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
         """Parse raw UDP data into RTP packet structure"""
         try:
             if len(data) < 12:  # Minimum RTP header size
@@ -1149,6 +1488,8 @@ class RTPServer:
         self.servers: Dict[int, Tuple[asyncio.DatagramTransport, RTPServerProtocol]] = {}
         self.session_manager = get_session_manager()
         self.packet_handlers: List[Callable[[RTPPacket, RTPEndpoint], None]] = []
+        self.session_id = None
+
         self.statistics = {
             'total_packets': 0,
             'total_bytes': 0,
@@ -1163,6 +1504,7 @@ class RTPServer:
                               codec: str = "ulaw") -> Optional[RTPEndpoint]:
         """Create a new RTP endpoint for a session"""
         try:
+            self.session_id = session_id
             async with self._lock:
                 # Validate codec
                 if not AudioCodec.validate_codec(codec):
@@ -1257,16 +1599,9 @@ class RTPServer:
         try:
             # Find endpoint by source port (assuming standard port mapping)
             endpoint = None
-            source_port = packet.source_address[1]
 
-            # Try to find endpoint by matching remote address
-            # for ep in self.endpoints.values():
-            #     if (ep.remote_host == packet.source_address[0] or
-            #             ep.remote_port == source_port):
-            #         endpoint = ep
-            #         break
-            if source_port in self.endpoints and self.endpoints[source_port].remote_host == packet.source_address[0]:
-                endpoint = self.endpoints[source_port]
+            if self.session_endpoints[self.session_id].remote_host == packet.source_address[0]:
+                endpoint = self.session_endpoints[self.session_id]
 
             if not endpoint:
                 logger.debug(f"No endpoint found for packet from {packet.source_address}")
@@ -1299,9 +1634,9 @@ class RTPServer:
                 except Exception as e:
                     logger.error(f"Error in packet handler: {e}")
 
-            logger.debug(f"Processed RTP packet: session={endpoint.session_id}, "
-                         f"seq={packet.header.sequence_number}, "
-                         f"payload={len(packet.payload)} bytes")
+            # logger.debug(f"Processed RTP packet: session={endpoint.session_id}, "
+            #              f"seq={packet.header.sequence_number}, "
+            #              f"payload={len(packet.payload)} bytes")
 
         except Exception as e:
             logger.error(f"Error processing RTP packet: {e}")

@@ -244,8 +244,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error analyzing audio quality: {e}")
             return self.current_metrics
-    
-    def _calculate_snr(self, frames: List[AudioFrame]) -> float:
+
+    @staticmethod
+    def _calculate_snr(frames: List[AudioFrame]) -> float:
         """Calculate Signal-to-Noise Ratio"""
         try:
             if not frames:
@@ -282,8 +283,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error calculating SNR: {e}")
             return 0.0
-    
-    def _calculate_jitter(self, frames: List[AudioFrame]) -> float:
+
+    @staticmethod
+    def _calculate_jitter(frames: List[AudioFrame]) -> float:
         """Calculate packet jitter in milliseconds"""
         try:
             if len(frames) < 2:
@@ -317,8 +319,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error calculating jitter: {e}")
             return 0.0
-    
-    def _calculate_packet_loss(self, frames: List[AudioFrame]) -> float:
+
+    @staticmethod
+    def _calculate_packet_loss(frames: List[AudioFrame]) -> float:
         """Calculate packet loss rate"""
         try:
             if len(frames) < 2:
@@ -373,8 +376,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error calculating latency: {e}")
             return 0.0
-    
-    def _calculate_thd(self, frames: List[AudioFrame]) -> float:
+
+    @staticmethod
+    def _calculate_thd(frames: List[AudioFrame]) -> float:
         """Calculate Total Harmonic Distortion (simplified)"""
         try:
             if not frames:
@@ -437,8 +441,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error calculating bandwidth: {e}")
             return 0.0
-    
-    def _calculate_mos(self, snr_db: float, jitter_ms: float, packet_loss: float) -> float:
+
+    @staticmethod
+    def _calculate_mos(snr_db: float, jitter_ms: float, packet_loss: float) -> float:
         """Calculate Mean Opinion Score (MOS) based on metrics"""
         try:
             # ITU-T G.107 E-model inspired MOS calculation
@@ -473,8 +478,9 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.error(f"Error calculating MOS: {e}")
             return 2.5  # Default fair quality
-    
-    def _determine_quality_level(self, mos_score: float) -> QualityLevel:
+
+    @staticmethod
+    def _determine_quality_level(mos_score: float) -> QualityLevel:
         """Determine quality level from MOS score"""
         if mos_score >= 4.0:
             return QualityLevel.EXCELLENT
@@ -560,7 +566,7 @@ class AudioQualityManager:
             'total_quality_alerts': 0
         }
     
-    def create_analyzer(self, session_id: str) -> AudioQualityAnalyzer:
+    def create_analyzer(self, session_id: str) -> Optional[AudioQualityAnalyzer]:
         """Create quality analyzer for session"""
         try:
             if session_id in self.analyzers:

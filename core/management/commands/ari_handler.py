@@ -125,7 +125,7 @@ class Command(BaseCommand):
                                                  'creationtime': '2025-09-23T23:42:50.719+0000', 'language': 'en'},
                          'asterisk_id': '1a:53:ae:b9:0f:79', 'application': 'live-transcript'}
 
-            call_session = session_manager.create_session_from_event(2, even_data)
+            call_session = session_manager.create_session_from_ari_event(2, even_data)
             await asyncio.sleep(2)
             sessionId = await session_manager.create_session(call_session)
             if sessionId:

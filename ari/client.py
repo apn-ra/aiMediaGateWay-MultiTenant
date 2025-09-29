@@ -12,8 +12,6 @@ from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Callable, C
 from types import TracebackType
 import aiohttp
 from aiohttp import BasicAuth, ClientTimeout, TCPConnector
-
-from ari import ChannelResource
 from ari.resources import BridgeResource, ChannelResource
 from ari.config import ARIConfig
 from ari.exceptions import (
@@ -290,8 +288,8 @@ class ARIClient:
             else:
                 raise ConnectionError(f"Failed to connect to Asterisk: {e}") from e
 
-    def close(self) -> None:
-        self.disconnect()
+    async def close(self) -> None:
+        await self.disconnect()
 
     async def disconnect(self) -> None:
         """Disconnect from Asterisk ARI.
@@ -1135,16 +1133,15 @@ class ARIClient:
 
     async def create_external_media(
             self,
+            external_host: str,
             app: Optional[str] = None,
-            external_host: Optional[str] = None,
             codec: Optional[str] = 'slin16',
+            encapsulation: Optional[str] = 'rtp',
             transport: Optional[str] = 'udp',
-            direction: Optional[str] = 'send',
+            direction: Optional[str] = 'both',
             connection_type: Optional[str] = 'client',
             channel_id: Optional[str] = None,
-            originating: Optional[bool] = False,
-            variables: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ChannelResource:
         """
         Creates an external media channel by interacting with an external system using
         HTTP POST. This method allows specifying various parameters to configure the
@@ -1159,12 +1156,11 @@ class ARIClient:
         :param app: The name of the application creating the external media connection.
         :param external_host: The external host address in the form of host:port.
         :param codec: The codec to be used for the external media; default is 'slin16'.
+        :param encapsulation: The encapsulation type to be used for the external media;
         :param transport: The transport protocol to be used; default is 'udp'.
         :param direction: The direction of media flow; 'send', 'receive', or 'both'.
         :param connection_type: The type of connection setup, either 'client' or 'server'.
         :param channel_id: The unique identifier of the channel to be used, if applicable.
-        :param originating: Specifies whether the channel is originating the media call.
-        :param variables: Optional parameters or variables needed for the external media setup.
         :return: A dictionary containing the result of the external media channel creation.
         """
         params = {
@@ -1174,15 +1170,14 @@ class ARIClient:
             "transport": transport,
             "direction": direction,
             "connection_type": connection_type,
-            "originating": originating,
+            "encapsulation": encapsulation,
         }
 
         if channel_id:
-            params["channel_id"] = channel_id
-        if variables:
-            params["variables"] = variables
+            params["channelId"] = channel_id
 
-        return await self.post("/channels/externalMedia", params=params)
+        external = await self.post("/channels/externalMedia", params=params)
+        return ChannelResource(self, external)
 
     async def snoop_channel(
             self,
@@ -1193,7 +1188,26 @@ class ARIClient:
             appArgs: Optional[List[Any]] = None,
             snoopId: Optional[str] = None
     ) -> ChannelResource:
+        """
+        Snoops a channel by creating a specified snoop resource using the provided
+        parameters. This method enables an application to configure monitoring
+        or interaction functionalities on a particular communication channel.
 
+        :param channel_id: The unique identifier of the channel to snoop.
+        :param spy: Spy mode configuration (optional). If set, enables a specific
+            spy mode for handling the snooping session.
+        :param whisper: Whisper mode configuration (optional). If set, enables
+            a specific whisper mode while snooping the channel.
+        :param app: Application name override (optional). If provided, overrides
+            the default application name for the snoop configuration.
+        :param appArgs: A list of additional arguments (optional). These provide
+            specific configurations or instructions for the application associated
+            with the snoop session.
+        :param snoopId: A unique identifier for the snoop session (optional).
+            If provided, it will associate this identifier with the snooping operation.
+        :return: A `ChannelResource` instance that encapsulates the details of
+            the created snoop resource on the channel.
+        """
         params = {
             "app": app or self.config.app_name,
             "channelId": channel_id,

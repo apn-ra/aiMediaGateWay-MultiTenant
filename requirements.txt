@@ -12,3 +12,8 @@ nvidia-riva-client==2.19.0
 soundfile==0.13.1
 numpy==2.3.3
 scipy==1.16.2
+pyrnnoise==0.3.8
+webrtcvad-wheels==2.0.14
+nemo_toolkit[asr]
+torch==2.8.0
+torchaudio==2.8.0
