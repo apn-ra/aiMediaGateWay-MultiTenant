@@ -1,26 +1,47 @@
 # Author: RA
 # Purpose: Audio Transcription
 # Created: 27/09/2025
-
-import asyncio
+import hashlib
+import json
 import logging
-from typing import Callable
-
+import asyncio
+import threading
+from typing import Callable, List, Any
 from django.conf import settings
-from core.junie_codes.rtp_server import AudioFrame
-from core.junie_codes.audio.audio_transcription import (TranscriptionProvider, TranscriptionSegment,
+from django.utils import timezone
+
+from core.junie_codes.audio.audio_transcription import (TranscriptionProvider, TranscriptionResult,
                                                         TranscriptionConfig, LanguageCode)
 
 logger = logging.getLogger(__name__)
 
+import riva.client
 from riva.client.proto import riva_asr_pb2
-from riva.client import (
-    Auth,
-    ASRService,
-    RecognitionConfig,
-    StreamingRecognitionConfig,
-    AudioEncoding,
-)
+
+class AsyncToSyncStream:
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.queue = asyncio.Queue()
+        self.closed = False
+
+    def put_nowait(self, item):
+        # logger.debug("AsyncToSyncStream: put_nowait")
+        asyncio.run_coroutine_threadsafe(self.queue.put(item), self.loop)
+
+    def close(self):
+        self.closed = True
+        asyncio.run_coroutine_threadsafe(self.queue.put(None), self.loop)
+
+    def start(self):
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+
+    def generator(self):
+        while True:
+            fut = asyncio.run_coroutine_threadsafe(self.queue.get(), self.loop)
+            item = fut.result()  # blocking here, so sync
+            if item is None:
+                break
+            yield item
 
 class RivaTranscriptionService:
     """NVIDIA RIVA ASR service integration (for nvidia-riva-client>=2.19.0)"""
@@ -32,12 +53,12 @@ class RivaTranscriptionService:
         self.auth = None
         self.service = None
         try:
-            self.auth = Auth(
+            self.auth = riva.client.Auth(
                 uri=self.riva_uri,
                 use_ssl=self.use_ssl,
                 ssl_cert=self.ssl_cert,
             )
-            self.service = ASRService(auth=self.auth)
+            self.service = riva.client.ASRService(auth=self.auth)
             logger.info("RIVA ASR service initialized with URI: %s", self.riva_uri)
         except Exception as e:
             logger.error("Failed to initialize RIVA ASR service: %s", e)
@@ -60,13 +81,46 @@ class RivaTranscriptionService:
         return mapping.get(language, "en-US")
 
 class AudioTranscriptionManager:
+    """
+    Manages audio transcription sessions and provides streaming transcription functionality.
+
+    This class is used to manage the process of transcribing audio streams using a
+    transcription service. It handles the setup, configuration, and control of streaming
+    transcriptions. It supports functionalities like language mapping, speaker diarization,
+    custom configuration, and word boosting. It also handles audio buffering and manages
+    the lifecycle of a streaming audio session.
+
+    :ivar callback: A function to handle transcription results.
+    :type callback: Callable[[TranscriptionResult], None]
+    :ivar session_id: Unique identifier for the transcription session.
+    :type session_id: str
+    :ivar bridge: An object for audio streaming bridge functionalities.
+    :type bridge: AsyncToSyncStream
+    :ivar config: Configuration settings for the transcription session.
+    :type config: TranscriptionConfig
+    :ivar streaming_config: Configuration for the streaming recognition service.
+    :type streaming_config: riva.client.StreamingRecognitionConfig
+    :ivar riva: RivaTranscriptionService instance for handling Riva-specific operations.
+    :type riva: RivaTranscriptionService
+    :ivar buffer: Internal buffer for handling audio data.
+    :type buffer: Any
+    :ivar frame_size: Size of each audio frame in bytes (default is 640).
+    :type frame_size: int
+    :ivar active: State flag indicating whether a transcription session is active.
+    :type active: bool
+    :ivar stats: Dictionary holding statistics about transcription sessions.
+    :type stats: dict
+    """
     def __init__(self):
+        self.callback = None
+        self.session_id = None
+        self.bridge = None
+        self.config = None
+        self.streaming_config = None
         self.riva = RivaTranscriptionService()
         self.buffer = None
         self.frame_size = 640
         self.active = False
-        # Session state
-        self.sessions = {}  # session_id -> {"queue": asyncio.Queue, "task": asyncio.Task, "active": bool}
 
         # Statistics
         self.stats = {
@@ -78,115 +132,143 @@ class AudioTranscriptionManager:
             'provider_usage': {provider.value: 0 for provider in TranscriptionProvider}
         }
 
-    async def start_transcription(self, session_id: str, config: TranscriptionConfig, callback: Callable):
-        """Start a continuous streaming session."""
-        if session_id in self.sessions:
-            logger.warning(f"Session {session_id} already active")
-            return
+    def start_stream(self, session_id:str, config: TranscriptionConfig, callback: Callable[[TranscriptionResult], None]) -> bool:
+        """
+        Starts a streaming transcription session for an audio stream.
 
-        self.buffer = bytearray()
-        queue = asyncio.Queue()
-        session = {"queue": queue, "task": None, "active": True}
-        self.sessions[session_id] = session
+        This method configures the streaming transcription by setting up language, model,
+        and a variety of parameters like word boosting, speaker diarization, endpoint
+        parameters, and custom configurations. It initiates an audio stream and starts
+        a separate thread for processing the transcription. If the process is successful,
+        it returns `True`. On failure, it logs the error and returns `False`.
 
-        riva_cfg = RecognitionConfig(
-            encoding=AudioEncoding.LINEAR_PCM,
-            sample_rate_hertz=config.sample_rate,
-            language_code=self.riva.map_language_to_riva(config.language),
-            enable_word_time_offsets=config.enable_word_timestamps,
-            enable_speaker_diarization=config.enable_speaker_diarization,
-            enable_automatic_punctuation=config.enable_punctuation,
-        )
+        :param session_id: Unique identifier for the transcription session.
+        :type session_id: str
+        :param config: Configuration object containing settings such as language, model name,
+                       and other transcription-specific parameters.
+        :type config: TranscriptionConfig
+        :param callback: Callable function to handle transcription results.
+        :type callback: Callable[[TranscriptionResult], None]
+        :return: Indicates whether the transcription session started successfully.
+        :rtype: bool
+        """
+        
+        try:
+            self.callback = callback
+            self.session_id = session_id
+            self.bridge = AsyncToSyncStream()
+            self.config = config
+            encoding = riva_asr_pb2.RecognitionConfig.DESCRIPTOR.fields_by_name[
+                "encoding"
+            ].enum_type.values_by_name["LINEAR_PCM"].number
 
-        streaming_config = StreamingRecognitionConfig(
-            config=riva_cfg, interim_results=True
-        )
+            self.streaming_config = riva.client.StreamingRecognitionConfig(
+                config=riva.client.RecognitionConfig(
+                    language_code=self.riva.map_language_to_riva(config.language),
+                    model=config.model_name,
+                    max_alternatives=1,
+                    profanity_filter=config.filter_profanity,
+                    enable_automatic_punctuation=config.punctuation,
+                    verbatim_transcripts=False,
+                    enable_word_time_offsets=config.word_time_offsets or config.speaker_diarization,
+                    sample_rate_hertz=16000,
+                    encoding=encoding,
+                ),
+                interim_results=True
+            )
 
-        async def request_generator():
-            # First, yield the streaming config
-            yield streaming_config
-            logger.debug(f"Streaming config sent for session {session_id}")
+            riva.client.add_word_boosting_to_config(self.streaming_config, config.boosted_lm_words,
+                                                    config.boosted_lm_score)
+            riva.client.add_speaker_diarization_to_config(self.streaming_config, config.speaker_diarization,
+                                                          config.diarization_max_speakers)
+            riva.client.add_endpoint_parameters_to_config(
+                self.streaming_config,
+                config.endpoint_parameters.start_history,
+                config.endpoint_parameters.start_threshold,
+                config.endpoint_parameters.stop_history,
+                config.endpoint_parameters.stop_history_eou,
+                config.endpoint_parameters.stop_threshold,
+                config.endpoint_parameters.stop_threshold_eou
+            )
 
-            # Continuously yield audio chunks as they arrive
-            while session["active"]:
-                chunk = await queue.get()  # waits for next audio frame
-                if chunk is None:  # End-of-stream sentinel
-                    logger.info(f"End of stream for session {session_id}")
-                    break
-                yield chunk  # Send chunk immediately to Riva
+            custom_config = {
+                "asr_confidence_threshold": config.confidence_threshold,
+                "custom_domain": config.custom_domain,
+            }
 
-        async def run_stream():
-            try:
-                for resp in self.riva.service.streaming_response_generator(request_generator()):
-                    for result in resp.results:
-                        if not result.alternatives:
-                            continue
-                        alt = result.alternatives[0]
-                        # Create a segment for interim/final transcripts
-                        segment = TranscriptionSegment(
-                            text=alt.transcript,
-                            start_time_seconds=0.0,
-                            end_time_seconds=0.0,
-                            confidence=alt.confidence,
-                            speaker_id=None,
-                        )
-                        callback(segment)
+            riva.client.add_custom_configuration_to_config(
+                self.streaming_config,
+                json.dumps(custom_config)
+            )
 
-                        # Emit word-level timings for final results
-                        if result.is_final and alt.words:
-                            for w in alt.words:
-                                callback(
-                                    TranscriptionSegment(
-                                        text=w.word,
-                                        start_time_seconds=w.start_time.seconds + w.start_time.nanos / 1e9,
-                                        end_time_seconds=w.end_time.seconds + w.end_time.nanos / 1e9,
-                                        confidence=w.confidence,
-                                        speaker_id=getattr(w, "speaker_tag", None),
-                                    )
-                                )
-            except Exception as e:
-                logger.error(f"Riva streaming error in session {session_id}: {e}")
-            finally:
-                logger.info(f"Streaming session {session_id} ended")
-                session["active"] = False
+            self.bridge.start()
+            threading.Thread(target=self.transcribe_streaming, daemon=True).start()
 
-        # Launch the streaming coroutine
-        session["task"] = asyncio.create_task(run_stream())
-        self.active = True
+            logger.info(f"Audio stream started for session: {session_id}")
+            self.active = True
+            return True
+        except Exception as e:
+            logger.error(f"Error starting audio stream: {e}")
+            self.active = False
+            return False
 
-    @staticmethod
-    def get_frame_duration(audioFrame: AudioFrame) -> float:
-        bytes_per_ms = (audioFrame.sample_rate * audioFrame.channels * 2) / 1000
-        return len(audioFrame.payload) / bytes_per_ms
-
-    async def send_frame(self, session_id: str, audio_frame):
-        """Push an audio frame to the session's queue."""
-        session = self.sessions.get(session_id)
-        if not session or not session["active"]:
-            logger.error(f"Cannot send frame: session {session_id} not active")
-            return
-
-        self.buffer.extend(audio_frame.payload)
-        while len(self.buffer) >= self.frame_size:
-            frame = self.buffer[:self.frame_size]
-            del self.buffer[:self.frame_size]
-            request = riva_asr_pb2.StreamingRecognizeRequest(audio_content=frame)
-            asyncio.create_task(session["queue"].put(request))
-
-    async def stop_transcription(self, session_id: str):
-        """Stop streaming and clean up session."""
-        session = self.sessions.pop(session_id, None)
-        if not session:
-            return
-
-        if self.buffer:
-            request = riva_asr_pb2.StreamingRecognizeRequest(audio_content=self.buffer)
-            asyncio.create_task(session["queue"].put(request))
-            self.buffer.clear()
-
-        session["active"] = False
-        await session["queue"].put(None)  # Sentinel to close generator
-        if session["task"]:
-            await session["task"]  # Wait for clean shutdown
-        logger.info(f"Session {session_id} stopped")
+    def stop_stream(self):
         self.active = False
+        self.bridge.close()
+        logger.info(f"Audio stream stopped for session: {self.session_id}")
+
+    def transcribe_streaming(self):
+        def audio_generator():
+            try:
+                for audio_chunk in self.bridge.generator():
+                    # denoised_frame = audio_chunk.payload
+                    original_frame = audio_chunk.original_packet.payload
+                    # original_frame = audio_chunk
+
+                    # frame_size = len(original_frame)  # bytes per frame
+                    # bytes_per_sample = 2  # 16-bit = 2 bytes
+                    # samples_per_frame = frame_size // bytes_per_sample
+                    # duration_per_frame = samples_per_frame / 16000
+
+                    #riva.client.sleep_audio_length(audio_chunk=original_frame, time_to_sleep=duration_per_frame)
+                    logger.debug(f"Frame Size: { len(original_frame) }")
+                    yield original_frame
+            except Exception as e:
+                logger.error(f"Error in audio generator: {e}")
+                raise
+
+        riva.client.print_streaming(
+            responses=self.riva.service.streaming_response_generator(
+                audio_chunks=audio_generator(),
+                streaming_config=self.streaming_config,
+            ),
+            show_intermediate=True,
+            additional_info="time" if (self.config.word_time_offsets or self.config.speaker_diarization) else (
+                "confidence" if self.config.print_confidence else "no"),
+            word_time_offsets=self.config.word_time_offsets or self.config.speaker_diarization,
+            speaker_diarization=self.config.speaker_diarization,
+        )
+
+        # for resp in self.riva.service.streaming_response_generator(
+        #         audio_chunks=audio_generator(),
+        #         streaming_config=self.streaming_config,
+        #     ):
+        #     for result in resp.results:
+        #         if not result.alternatives:
+        #             continue
+        #         alt = result.alternatives[0]
+        #         if result.is_final and alt.words:
+        #             # logger.debug(f"Final Transcription Result: {result}")
+        #             self.callback(TranscriptionResult(
+        #                 transcription_id=self.session_id,
+        #                 session_id=self.session_id,
+        #                 provider=TranscriptionProvider.NVIDIA_RIVA,
+        #                 text=result.alternatives[0].transcript,
+        #                 language_detected='en-US',
+        #                 confidence_average= result.alternatives[0].confidence,
+        #                 segments= result.alternatives[0].words,
+        #                 processing_time_seconds= 0.0,
+        #                 audio_duration_seconds=0.0,
+        #                 created_at=timezone.now(),
+        #                 success=True,
+        #             ))

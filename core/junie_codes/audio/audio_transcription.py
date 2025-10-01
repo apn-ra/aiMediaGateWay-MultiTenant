@@ -75,6 +75,15 @@ class LanguageCode(Enum):
     JAPANESE_JP = "ja-JP"
     AUTO_DETECT = "auto"
 
+@dataclass
+class RivaEndpointParametersConfig:
+    """Configuration for Riva endpoint parameters"""
+    start_history:int = -1  # ms of history to use before start
+    start_threshold:float = -1.0  # how sensitive to speech start
+    stop_history:int = -1  # ms of history for stop
+    stop_history_eou:int = -1  # ms for end-of-utterance stop
+    stop_threshold:float = -1.0  # silence threshold for stop
+    stop_threshold_eou:float = -1.0  # silence threshold for EoU
 
 @dataclass
 class TranscriptionConfig:
@@ -82,16 +91,23 @@ class TranscriptionConfig:
     provider: TranscriptionProvider = TranscriptionProvider.NVIDIA_RIVA
     mode: TranscriptionMode = TranscriptionMode.BATCH
     language: LanguageCode = LanguageCode.AUTO_DETECT
-    enable_speaker_diarization: bool = True
-    enable_punctuation: bool = True
-    enable_word_timestamps: bool = True
+    speaker_diarization: bool = True
+    diarization_max_speakers: int = 2
+    punctuation: bool = True
+    word_timestamps: bool = True
+    word_time_offsets: bool = False
     confidence_threshold: float = 0.7
     sample_rate: int = 16000  # Optimal for most services
     chunk_duration_seconds: int = 30  # For real-time processing
-    max_alternatives: int = 3
+    max_alternatives: int = 1
     filter_profanity: bool = True
     custom_vocabulary: List[str] = field(default_factory=list)
-
+    boosted_lm_words: List[str] = field(default_factory=list)
+    print_confidence: bool = False
+    endpoint_parameters: RivaEndpointParametersConfig = field(default_factory=RivaEndpointParametersConfig)
+    boosted_lm_score: float = 1.0
+    custom_domain: str = ''
+    model_name: str = ''
 
 @dataclass
 class TranscriptionSegment:

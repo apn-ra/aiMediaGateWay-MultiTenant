@@ -93,6 +93,19 @@ class AudioFrame:
     is_speech:bool = False
     avg_speech_prob: float = 0.0
 
+    @property
+    def original_duration_ms(self):
+        bytes_per_sample = 2  # 16-bit = 2 bytes
+        total_samples = self.original_packet.size / (bytes_per_sample * self.channels)
+        duration_sec = total_samples / self.sample_rate
+        return duration_sec * 1000
+
+    @property
+    def duration_ms(self):
+        bytes_per_sample = 2  # 16-bit = 2 bytes
+        total_samples = len(self.payload) / (bytes_per_sample * self.channels)
+        duration_sec = total_samples / self.sample_rate
+        return duration_sec * 1000
 
 @dataclass
 class AudioBufferStats:
@@ -435,7 +448,7 @@ class AudioProcessor:
         self.rnnoise = pyrnnoise.RNNoise(sample_rate=48000)
 
         # WebRTC VAD (aggressiveness 0–3; 3 = most aggressive)
-        self.vad = webrtcvad.Vad(0)
+        self.vad = webrtcvad.Vad(2)
 
         self.conversion_cache: Dict[str, bytes] = {}
 

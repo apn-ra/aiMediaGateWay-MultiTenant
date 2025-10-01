@@ -3,171 +3,130 @@
 # Created: 22/09/2025
 
 import asyncio
+import logging
 import soundfile as sf
+import numpy as np
+
 from django.core.management.base import BaseCommand
-from ari import ARIClient, ARIConfig
-from core.ari.events import ARIEventHandler
-from core.session.manager import get_session_manager
-from core.junie_codes.rtp_integration import get_rtp_integrator
-from riva.client import SpeechSynthesisService
-from riva.client import Auth
-from django.utils import timezone
+from core.audio.transcription import AudioTranscriptionManager
+from core.junie_codes.audio.audio_transcription import TranscriptionConfig, TranscriptionSegment, LanguageCode, \
+    RivaEndpointParametersConfig, TranscriptionResult
+from riva.client.argparse_utils import add_asr_config_argparse_parameters, add_connection_argparse_parameters
 
-class SimpleCallHandler:
-    def __init__(self, config: ARIConfig):
-        self.config = config
-        self.client = None
-        # self.riva_tts = SpeechSynthesisService(auth=Auth(uri="localhost:50051", use_ssl=False))
-
-    # def create_audio_file(self, text):
-    #     audio_file = sf.SoundFile("/tmp/text.wav", mode="w", samplerate=16000, channels=1)
-    #     resp = self.riva_tts.synthesize(text, voice_name="English-US.Female-1", encoding="LINEAR_PCM")
-    #     audio_file.write(resp.audio)
-    #     audio_file.close()
-    #     return audio_file.name
-
-    async def start(self):
-        self.client = ARIClient(self.config)
-        await self.client.connect()
-
-        # Register event handlers
-        self.client.on_event('StasisStart', self.handle_stasis_start)
-        self.client.on_event('ChannelCreated', self.handle_channel_created)
-        self.client.on_event('ChannelDestroyed', self.handle_channel_destroyed)
-        self.client.on_event('ChannelStateChange', self.handle_channel_state_changed)
-        self.client.on_event('ChannelHangupRequest', self.handle_channel_hangup_request)
-        self.client.on_event('StasisEnd', self.handle_statis_end)
-
-        # Start WebSocket connection
-        await self.client.connect_websocket()
-        print("Call handler started")
-
-    async def stop(self):
-        await self.client.close()
-
-    @staticmethod
-    async def handle_channel_hangup_request(event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-        print(f"Channel Hangup Request: {channel_id}")
-
-    @staticmethod
-    async def handle_channel_state_changed(event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-        channel_state = channel['state']
-        print(f"Channel state changed: {channel_id} -> {channel_state}")
-
-    @staticmethod
-    async def handle_channel_destroyed(event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-        print(f"Channel destroyed: {channel_id}")
-
-    @staticmethod
-    async def handle_channel_created(event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-        print(f"Channel created: {channel_id}")
-
-    async def handle_statis_end(self, event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-        print(f"Channel Ended: {channel_id}")
-
-    async def handle_stasis_start(self, event_data):
-        channel = event_data['channel']
-        channel_id = channel['id']
-
-        print(f"\n\nEvent Data: {event_data}\n\n")
-        # fileName = self.create_audio_file("Welcome to the Asterisk Media Gateway")
-        try:
-            # Answer the channel
-            await self.client.answer_channel(channel_id)
-
-            # Play welcome message
-            await self.client.post(
-                f"/channels/{channel_id}/play",
-                json_data={'media': f'sound:demo-congrats'}
-            )
-
-            # Wait a bit then hang up
-            await self.client.continue_to_dialplan(channel_id)
-
-        except Exception as e:
-            print(f"Error handling call: {e}")
+logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
     help = 'Handle ARI events'
 
+    def wav_to_slin16_frames(self, filepath: str, frame_duration_ms: int = 20):
+        """
+        Convert a WAV file to SLIN16 frames (16-bit PCM, 16kHz).
+
+        Args:
+            filepath: Path to the WAV file
+            frame_duration_ms: Frame size in milliseconds (default 20ms)
+
+        Returns:
+            List of byte strings, each representing one SLIN16 frame
+        """
+        # Read audio file
+        data, samplerate = sf.read(filepath, dtype="int16")
+
+        # If stereo, convert to mono (take mean across channels)
+        if data.ndim > 1:
+            data = np.mean(data, axis=1).astype(np.int16)
+
+        # Resample if needed
+        if samplerate != 16000:
+            import librosa
+            data = librosa.resample(
+                data.astype(np.float32), orig_sr=samplerate, target_sr=16000
+            ).astype(np.int16)
+            samplerate = 16000
+
+        # Compute frame size (samples per frame)
+        samples_per_frame = int(16000 * frame_duration_ms / 1000)
+
+        # Split into frames
+        frames = []
+        for i in range(0, len(data), samples_per_frame):
+            frame = data[i:i + samples_per_frame]
+            if len(frame) < samples_per_frame:
+                break  # Drop incomplete frame (optional: pad instead)
+            frames.append(frame.tobytes())  # SLIN16 = raw PCM16 little-endian
+
+        return frames
+
+    def transcript_result(self, result: TranscriptionResult):
+        logger.info(f"Transcript: {result.text}")
+
     def add_arguments(self, parser):
+        # parser = argparse.ArgumentParser(
+        #     description="Streaming transcription of a file via Riva AI Services. Streaming means that audio is sent to a "
+        #                 "server in small chunks and transcripts are returned as soon as these transcripts are ready. "
+        #                 "You may play transcribed audio simultaneously with transcribing by setting one of parameters "
+        #                 "`--play-audio` or `--output-device`.",
+        #     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        # )
+
         parser.add_argument(
-            '--tenantId',
-            type=str,
-            help='Asterisk Tenant ID'
+            "--file-streaming-chunk",
+            type=int,
+            default=1600,
+            help="A maximum number of frames in one chunk sent to server.",
         )
 
-    async def test_session_rtp_integration(self):
-        try:
-            session_manager = get_session_manager()
-            even_data = {'type': 'StasisStart',
-                         'timestamp': '2025-09-23T23:42:50.723+0000',
-                         'args': [], 'channel': {'id': '1758670970.74',
-                                                 'name': 'PJSIP/6001-00000030',
-                                                 'state': 'Ring',
-                                                 'protocol_id': 'NmJkYzU4MTVjNTlhNDgwNjUzY2UwNDQwMWU4NDdlZDQ.',
-                                                 'caller': {'name': '6001', 'number': '6001'},
-                                                 'connected': {'name': '', 'number': ''},
-                                                 'accountcode': '',
-                                                 'dialplan': {'context': 'from-internal',
-                                                              'exten': '2222', 'priority': 2,
-                                                              'app_name': 'Stasis', 'app_data': 'live-transcript'},
-                                                 'creationtime': '2025-09-23T23:42:50.719+0000', 'language': 'en'},
-                         'asterisk_id': '1a:53:ae:b9:0f:79', 'application': 'live-transcript'}
+        parser = add_connection_argparse_parameters(parser)
+        parser = add_asr_config_argparse_parameters(parser, max_alternatives=True, profanity_filter=True,
+                                                    word_time_offsets=True)
+        # parser = parser.parse_args()
 
-            call_session = session_manager.create_session_from_ari_event(2, even_data)
-            await asyncio.sleep(2)
-            sessionId = await session_manager.create_session(call_session)
-            if sessionId:
-                rtp_integrator = get_rtp_integrator()
-                await rtp_integrator.start()
+    async def traffic_generator(self, transcription):
+        frames = self.wav_to_slin16_frames('/opt/apnra-files/aiMediaGatewayV2/docs/riva_examples/sample1.wav')
 
-                await rtp_integrator.integrate_session(session_id=sessionId)
+        await asyncio.sleep(1)
+        #logger.info(f"Frames: {len(frames)}")
 
-                # Check status
-                status = await rtp_integrator.get_integration_status(sessionId)
-                # print("Current Status:", status)
-
-                # Wait for a while (simulate a call)
-                await asyncio.sleep(5)
-            else:
-                print("Failed to create session")
-                raise
-
-        except Exception as e:
-            print(f"Error in test_session_rtp_integration: {e}")
-        finally:
-            await rtp_integrator.de_integrate_session(session_id=sessionId)
-            await rtp_integrator.stop()
-            print("Cleaning up session")
-            await asyncio.sleep(1)
-            await session_manager.cleanup_session(sessionId)
-            print("Cleaned up session Done")
+        for frame in frames:
+            #logger.debug(f"Frame: {len(frame)}")
+            transcription.bridge.put_nowait(frame)
+            await asyncio.sleep(0.02)
 
     async def handle_async(self, *args, **options):
-        event_handler = ARIEventHandler()
-        connection = await event_handler.register_handlers(2)
-        asyncio.create_task(connection.client.connect_websocket())
-        await asyncio.get_running_loop().create_future()
+        transcription = AudioTranscriptionManager()
 
+        config = TranscriptionConfig(
+            word_time_offsets=options.get('word_time_offsets', False),
+            max_alternatives=options.get('max_alternatives', 1),
+            filter_profanity=options.get('filter_profanity', False),
+            punctuation= True, #options.get('punctuation', False),
+            language=LanguageCode.ENGLISH_US,
+            boosted_lm_words=options.get('boosted_lm_words', []),
+            boosted_lm_score=options.get('boosted_lm_score', 4.0),
+            speaker_diarization= False, #options.get('speaker_diarization', False),
+            diarization_max_speakers= 2, #options.get('diarization_max_speakers', 2),
+            endpoint_parameters=RivaEndpointParametersConfig(
+                start_history=options.get('start_history', -1),
+                start_threshold=options.get('start_threshold', -1.0),
+                stop_history=options.get('stop_history', -1),
+                stop_history_eou=options.get('stop_history_eou', -1),
+                stop_threshold=options.get('stop_threshold', -1.0),
+                stop_threshold_eou=options.get('stop_threshold_eou', -1.0),
+            ),
+            model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
+        )
+
+        transcription.start_stream(
+            session_id='123456789',
+            config=config,
+            callback=self.transcript_result
+        )
+
+        await self.traffic_generator(transcription=transcription)
+
+        await asyncio.sleep(10)
+
+        transcription.stop_stream()
 
     def handle(self, *args, **options):
-        tenant_id = options['tenantId']
-
-        # Catch Ctrl+C at the top level
-        try:
-            asyncio.run(self.handle_async())
-        except KeyboardInterrupt:
-            # User pressed Ctrl+C
-            self.stdout.write(self.style.WARNING("Keyboard interrupt received. Shutting down..."))
-
+        asyncio.run(self.handle_async(*args, **options))

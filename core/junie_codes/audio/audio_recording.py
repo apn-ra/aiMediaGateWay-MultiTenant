@@ -812,7 +812,7 @@ def get_recording_manager() -> AudioRecordingManager:
 # Convenience functions
 async def start_session_recording(
     session_id: str, 
-    tenant_id: str, 
+    tenant_id: int,
     config: RecordingConfig = None
 ) -> Optional[str]:
     """Start recording for a session"""

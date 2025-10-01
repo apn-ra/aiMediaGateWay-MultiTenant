@@ -18,16 +18,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from django.utils import timezone
 
-from core.session.manager import get_session_manager, CallSessionData
 from core.audio.transcription import AudioTranscriptionManager
+from core.session.manager import get_session_manager, CallSessionData
 from core.junie_codes.rtp_server import (get_rtp_server, RTPEndpoint, RTPSessionEndpointManager,
                                          RTPStatisticsCollector, AudioFrame, AudioProcessor)
-from core.junie_codes.audio.audio_transcription import get_transcription_manager, TranscriptionConfig, \
-    TranscriptionProvider, LanguageCode, TranscriptionSegment
-from core.junie_codes.audio.audio_streaming import get_streaming_manager
-from core.junie_codes.audio.audio_recording import get_recording_manager
+from core.junie_codes.audio.audio_transcription import TranscriptionConfig, \
+    TranscriptionProvider, LanguageCode, TranscriptionResult
+
+from core.junie_codes.audio.audio_conversion import get_audio_converter
 from core.junie_codes.audio.audio_quality import get_quality_manager
-from core.junie_codes.audio.audio_conversion import get_audio_converter, AudioSpec, AudioFormat
+from core.junie_codes.audio.audio_conversion import AudioSpec, AudioFormat
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,8 @@ class RTPSessionIntegrator:
         self.statistics_collector = RTPStatisticsCollector()
         
         # Audio processing managers
-        # self.transcription_manager = AudioTranscriptionManager()
-        # self.streaming_manager = get_streaming_manager()
-        # self.recording_manager = get_recording_manager()
         self.quality_manager = get_quality_manager()
-        # self.audio_converter = get_audio_converter()
+        self.audio_converter = get_audio_converter()
         
         # Integration state
         self.active_integrations: Dict[str, Dict[str, Any]] = {}  # session_id -> integration data
@@ -129,8 +126,10 @@ class RTPSessionIntegrator:
         except Exception as e:
             logger.error(f"Error stopping RTP Session Integrator: {e}")
 
-    async def transcription_result(self, segment: TranscriptionSegment):
-        logger.info(f"RTP Session Integrator transcription result: {segment}")
+    def transcription_result(self, result: TranscriptionResult):
+        # loop = asyncio.get_event_loop()
+        # session = loop.run_until_complete(self.session_manager.get_session(result.session_id))
+        logger.info(f"{result.session_id} TEXT:{result.text}")
 
     async def integrate_session(self, session_id: str, routing_decision=None) -> bool:
         """Integrate a session with RTP server"""
@@ -163,34 +162,28 @@ class RTPSessionIntegrator:
             audio_quality_analyzer = None
             audio_streaming_registered = False
             audio_recording_started = False
-            audio_transcription_started = False
 
             try:
-                # config = TranscriptionConfig()
+                config = TranscriptionConfig(
+                    word_time_offsets=False,
+                    max_alternatives=1,
+                    filter_profanity=True,
+                    punctuation=False,
+                    language=LanguageCode.ENGLISH_US,
+                    speaker_diarization=False,
+                    diarization_max_speakers=2,
+                    model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
+                )
 
-                # await self.transcription_manager.start_transcription(
-                #     session_id=session_id, config=config, callback=self.transcription_result
-                # )
+                transcription_manager = AudioTranscriptionManager()
+                transcription_manager.start_stream(
+                    session_id=session_id,
+                    config=config,
+                    callback=self.transcription_result
+                )
 
                 # Initialize quality analyzer
                 audio_quality_analyzer = self.quality_manager.create_analyzer(session_id)
-
-                # Register session for streaming
-                # await self.streaming_manager.register_session(session_id)
-                # audio_streaming_registered = True
-
-                # Start recording if configured
-                # recording_config = getattr(self.config, 'recording_config', None)
-                # if recording_config or True:  # Default to enable recording
-                #     await self.recording_manager.start_recording(session_id, session.tenant_id, recording_config)
-                #    audio_recording_started = True
-
-                # Start real-time transcription if configured
-                # transcription_config = getattr(self.config, 'transcription_config', None)
-                # if transcription_config or True:  # Default to enable transcription
-                #     await self.transcription_manager.start_real_time_transcription(session_id, transcription_config)
-                #     audio_transcription_started = True
-
                 logger.info(f"Audio processing components initialized for session {session_id}")
 
             except Exception as e:
@@ -205,7 +198,7 @@ class RTPSessionIntegrator:
                 'audio_quality_analyzer': audio_quality_analyzer,
                 'audio_streaming_registered': audio_streaming_registered,
                 'audio_recording_started': audio_recording_started,
-                'audio_transcription_started': audio_transcription_started,
+                'transcription_manager': transcription_manager,
                 'created_at': timezone.now(),
                 'last_sync': timezone.now(),
                 'stats': {
@@ -258,6 +251,9 @@ class RTPSessionIntegrator:
             # Remove Audio Quality Analyzer
             if integration_data.get('audio_quality_analyzer'):
                 self.quality_manager.remove_analyzer(session_id)
+
+            if integration_data.get('transcription_manager'):
+                integration_data.get('transcription_manager').stop_stream()
 
             # Clean up integration data
             del self.active_integrations[session_id]
@@ -318,34 +314,19 @@ class RTPSessionIntegrator:
                         if not audio_frame:
                             return
 
+                        # if audio_frame.is_speech and round(audio_frame.avg_speech_prob, 2) > 0.50:
+                        #     logger.debug(f"Speech detected: {round(audio_frame.avg_speech_prob, 2)}")
+                        transcript = self.active_integrations[endpoint.session_id].get('transcription_manager')
+                        if transcript and round(audio_frame.avg_speech_prob, 2) > 0.50:
+                            # logger.debug(f"Speech Probability: {round(audio_frame.avg_speech_prob, 2)}")
+                            transcript.bridge.put_nowait(audio_frame)
+
                         # Quality Monitoring
                         quality_monitor = self.active_integrations[endpoint.session_id].get('quality_monitor')
                         if quality_monitor:
                             quality_monitor.update_with_packet(packet)
 
-                        # logger.debug(f"VAD: {audio_frame.is_speech} for session {endpoint.session_id}")
 
-                        # if audio_frame.is_speech:
-                        #     logger.debug(f"Audio frame avg speech prob: {audio_frame.avg_speech_prob}")
-
-                        # Additional quality analysis
-                        # audio_quality_analyzer = self.active_integrations[endpoint.session_id].get('audio_quality_analyzer')
-                        # if audio_quality_analyzer:
-                        #     self.quality_manager.add_audio_frame(session_id, audio_frame)
-
-                        # 2. Audio Streaming
-                        # if integration_data.get('audio_streaming_registered'):
-                        #     await self.streaming_manager.stream_audio_frame(session_id, audio_frame)
-
-                        # 3. Audio Recording
-                        # if integration_data.get('audio_recording_started'):
-                        #     await self.recording_manager.add_audio_frame(session_id, audio_frame)
-
-                        # 4. Audio Transcription (process audio frame for transcription)
-                        # if integration_data.get('audio_transcription_started'):
-                        #     # Note: Transcription typically works with accumulated audio data
-                        #     # This might need buffering or periodic processing
-                        #     await self._process_audio_for_transcription(session_id, audio_frame)
                     else:
                         logger.debug(f"Session ID: {endpoint.session_id} not on active integration")
 
