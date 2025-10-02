@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 class AMIEventHandler:
 
     def __init__(self):
+        self.bridge_id = None
         self.rtp_integrator = None
         self.ari_event_handler = None
         self.tenant_id = None
@@ -70,30 +71,43 @@ class AMIEventHandler:
 
         if self.session_manager.is_inbound_channel(message.get('channel')):
             session_data = await self.session_manager.create_session_from_ami_bridge_enter_event(self.tenant_id, message)
+
             session_data.rtp_endpoint_host = config('AI_MEDIA_GATEWAY_HOST')
-
             session_data.asterisk_host = self.ami_manager.connections[self.tenant_id].config.host
-            sessionId = await self.session_manager.create_session(session_data=session_data)
 
-            if sessionId:
+            if self.bridge_id is None:
+                logger.info(f"Bridge Enter Event: {session_data}")
+                self.bridge_id = session_data.bridge_id
+
+                session_id = await self.session_manager.create_session(session_data=session_data)
+
                 client = self.ari_event_handler.ari_manager.connections[self.tenant_id].client
-                success = await self.rtp_integrator.integrate_session(session_id=sessionId)
-                if success:
-                    session = await self.session_manager.get_session(session_id=sessionId)
-                    externalHost = f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}"
+                await client.snoop_channel(
+                    channel_id=session_data.channel.id,
+                    spy='both',
+                    appArgs=f"session_id,{session_id}"
+                )
 
-                    snoop_channel = await client.snoop_channel(channel_id=sessionId, spy='both')
-                    em_channel = await client.create_external_media(external_host=externalHost)
+                # await client.create_channel(
+                #     endpoint='PJSIP/6002',
+                #     app_args=f"snoop_channel,{snoop_channel.id}"
+                # )
 
-                    bridge = await client.create_bridge(bridge_type='mixing')
-                    await bridge.add_channel(snoop_channel.id)
-                    await bridge.add_channel(em_channel.id)
-
-                    await self.session_manager.update_session(sessionId, {
-                        'snoop_channel_id': ' ',
-                        'external_media_channel_id': em_channel.id
-                    })
-
+                # success = await self.rtp_integrator.integrate_session(session_id=session_data.session_id)
+                # if success:
+                #     session = await self.session_manager.get_session(session_data.session_id)
+                #     client = self.ari_event_handler.ari_manager.connections[self.tenant_id].client
+                #     externalHost = f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}"
+                #     em_channel = await client.create_external_media(external_host=externalHost)
+                #     bridge = await client.get_bridge(bridge_id=session.bridge_id)
+                #     await bridge.add_channel(em_channel.id)
+                #
+                #     await self.session_manager.update_session(session.session_id, {
+                #             'snoop_channel_id': ' ',
+                #             'external_media_channel_id': em_channel.id
+                #     })
+            # else:
+            #     logger.info(f"Session already exist:  {session_data}")
 
     async def handle_hangup(self, manager, message: Dict[str, Any]):
         """
@@ -106,11 +120,11 @@ class AMIEventHandler:
         if self.session_manager.is_inbound_channel(message.get('channel')):
             # Get an existing session
             session = await self.session_manager.get_session(uniqueid)
-            if session:
+            if session and self.bridge_id == session.bridge_id:
 
                 # Hangup ExternalMedia Channel
                 client = self.ari_event_handler.ari_manager.connections[self.tenant_id].client
-                await client.hangup_channel(channel_id=session.external_media_channel_id, reason='normal')
+                # await client.hangup_channel(channel_id=session.external_media_channel_id, reason='normal')
 
                 metadata = session.metadata
                 metadata['hangup_code'] = message.get('Cause')

@@ -1185,7 +1185,7 @@ class ARIClient:
             spy: Optional[str] = None,
             whisper: Optional[str] = None,
             app: Optional[str] = None,
-            appArgs: Optional[List[Any]] = None,
+            appArgs: Optional[str] = None,
             snoopId: Optional[str] = None
     ) -> ChannelResource:
         """

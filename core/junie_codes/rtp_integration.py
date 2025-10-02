@@ -27,7 +27,8 @@ from core.junie_codes.audio.audio_transcription import TranscriptionConfig, \
 
 from core.junie_codes.audio.audio_conversion import get_audio_converter
 from core.junie_codes.audio.audio_quality import get_quality_manager
-from core.junie_codes.audio.audio_conversion import AudioSpec, AudioFormat
+from core.junie_codes.audio.audio_conversion import AudioSpec, AudioFormat, detect_audio_format
+from core.junie_codes.audio.audio_recording import get_recording_manager
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,8 @@ class RTPSessionIntegrator:
         # Audio processing managers
         self.quality_manager = get_quality_manager()
         self.audio_converter = get_audio_converter()
-        
+        self.audio_recording = get_recording_manager()
+
         # Integration state
         self.active_integrations: Dict[str, Dict[str, Any]] = {}  # session_id -> integration data
         self.sync_task: Optional[asyncio.Task] = None
@@ -161,7 +163,7 @@ class RTPSessionIntegrator:
             # Initialize audio processing components
             audio_quality_analyzer = None
             audio_streaming_registered = False
-            audio_recording_started = False
+            recording_id = None
 
             try:
                 config = TranscriptionConfig(
@@ -172,7 +174,8 @@ class RTPSessionIntegrator:
                     language=LanguageCode.ENGLISH_US,
                     speaker_diarization=False,
                     diarization_max_speakers=2,
-                    model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
+                    model_name='parakeet-1.1b-unified-ml-cs-universal-multi-asr-streaming-asr-bls-ensemble'
+                    # model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
                 )
 
                 transcription_manager = AudioTranscriptionManager()
@@ -180,6 +183,12 @@ class RTPSessionIntegrator:
                     session_id=session_id,
                     config=config,
                     callback=self.transcription_result
+                )
+
+                recording_id = await self.audio_recording.start_recording(
+                    session_id=session_id,
+                    tenant_id=2,
+                    config=None
                 )
 
                 # Initialize quality analyzer
@@ -197,7 +206,7 @@ class RTPSessionIntegrator:
                 'quality_monitor': quality_monitor,
                 'audio_quality_analyzer': audio_quality_analyzer,
                 'audio_streaming_registered': audio_streaming_registered,
-                'audio_recording_started': audio_recording_started,
+                'recording_id': recording_id,
                 'transcription_manager': transcription_manager,
                 'created_at': timezone.now(),
                 'last_sync': timezone.now(),
@@ -255,6 +264,10 @@ class RTPSessionIntegrator:
             if integration_data.get('transcription_manager'):
                 integration_data.get('transcription_manager').stop_stream()
 
+            if integration_data.get('recording_id'):
+                await self.audio_recording.stop_recording(recording_id=integration_data.get('recording_id'))
+                await self.audio_recording.stop_session_recordings(session_id=session_id)
+
             # Clean up integration data
             del self.active_integrations[session_id]
             
@@ -310,16 +323,23 @@ class RTPSessionIntegrator:
                         stats['bytes_processed'] += packet.size
                     
                         # Convert RTP packet to AudioFrame for audio processing
-                        audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
+                        # audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
+                        audio_frame = self._convert_rtp_to_audio_frame(packet=packet, endpoint=endpoint)
                         if not audio_frame:
                             return
 
-                        # if audio_frame.is_speech and round(audio_frame.avg_speech_prob, 2) > 0.50:
-                        #     logger.debug(f"Speech detected: {round(audio_frame.avg_speech_prob, 2)}")
-                        transcript = self.active_integrations[endpoint.session_id].get('transcription_manager')
-                        if transcript and round(audio_frame.avg_speech_prob, 2) > 0.50:
+                        # transcript = self.active_integrations[endpoint.session_id].get('transcription_manager')
+                        # if transcript:
                             # logger.debug(f"Speech Probability: {round(audio_frame.avg_speech_prob, 2)}")
-                            transcript.bridge.put_nowait(audio_frame)
+                        #    transcript.bridge.put_nowait(audio_frame)
+                            # logger.debug(f"Detect Audio Format: {detect_audio_format(audio_frame.original_packet.payload)}")
+
+                        recording_id = self.active_integrations[endpoint.session_id].get('recording_id')
+                        if recording_id:
+                            await self.audio_recording.add_audio_frame(
+                                session_id=endpoint.session_id,
+                                frame=audio_frame,
+                            )
 
                         # Quality Monitoring
                         quality_monitor = self.active_integrations[endpoint.session_id].get('quality_monitor')
@@ -622,9 +642,9 @@ class RTPSessionIntegrator:
                         continue
                     
                     # Check for inactive integrations
-                    last_sync = integration_data.get('last_sync', integration_data['created_at'])
-                    if (current_time - last_sync).total_seconds() > (self.config.cleanup_delay * 2):
-                        logger.warning(f"Integration for session {session_id} appears stale")
+                    # last_sync = integration_data.get('last_sync', integration_data['created_at'])
+                    # if (current_time - last_sync).total_seconds() > (self.config.cleanup_delay * 2):
+                    #    logger.warning(f"Integration for session {session_id} appears stale")
                 
                 # Clean up stale sessions
                 for session_id in stale_sessions:

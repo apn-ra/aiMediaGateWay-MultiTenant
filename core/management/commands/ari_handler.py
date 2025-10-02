@@ -9,6 +9,7 @@ import numpy as np
 
 from django.core.management.base import BaseCommand
 from core.audio.transcription import AudioTranscriptionManager
+from core.junie_codes.audio.audio_conversion import detect_audio_format
 from core.junie_codes.audio.audio_transcription import TranscriptionConfig, TranscriptionSegment, LanguageCode, \
     RivaEndpointParametersConfig, TranscriptionResult
 from riva.client.argparse_utils import add_asr_config_argparse_parameters, add_connection_argparse_parameters
@@ -82,13 +83,13 @@ class Command(BaseCommand):
         # parser = parser.parse_args()
 
     async def traffic_generator(self, transcription):
-        frames = self.wav_to_slin16_frames('/opt/apnra-files/aiMediaGatewayV2/docs/riva_examples/sample1.wav')
+        frames = self.wav_to_slin16_frames('/opt/apnra-files/aiMediaGatewayV2/docs/riva_examples/audio_samples/tagalog/segment_2.wav')
 
         await asyncio.sleep(1)
         #logger.info(f"Frames: {len(frames)}")
 
         for frame in frames:
-            #logger.debug(f"Frame: {len(frame)}")
+            logger.debug(f"Frame: {detect_audio_format(frame)}")
             transcription.bridge.put_nowait(frame)
             await asyncio.sleep(0.02)
 
@@ -113,8 +114,10 @@ class Command(BaseCommand):
                 stop_threshold=options.get('stop_threshold', -1.0),
                 stop_threshold_eou=options.get('stop_threshold_eou', -1.0),
             ),
-            model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
+            model_name= 'parakeet-1.1b-unified-ml-cs-universal-multi-asr-streaming-asr-bls-ensemble'
+            # model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
         )
+
 
         transcription.start_stream(
             session_id='123456789',

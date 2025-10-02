@@ -58,7 +58,7 @@ class AMIConnection:
         self.stats.events_processed += 1
 
         # ev = event.get('Event')
-        # logger.info(f"Event: {ev}")
+        #logger.info(f"Event: {ev}")
 
     def register_event_handler(self, event_type: str, handler: Callable):
         """Register event handler for specific AMI event type."""

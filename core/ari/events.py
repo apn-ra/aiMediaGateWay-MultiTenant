@@ -62,7 +62,11 @@ class ARIEventHandler:
         """Handle StasisStart events."""
         channel = event_data['channel']
         channel_id = channel['id']
-        # logger.info(f"Received StasisStart {event_data}")
+        logger.info(f"Received StasisStart: {event_data}")
+
+        if len(event_data['args']) == 2 and event_data['args'][0] == 'session_id':
+           session = await self.session_manager.get_session(event_data['args'][1])
+           logger.info(f"Session: {session}")
 
     async def handle_StasisEnd(self, event_data):
         """Handle StasisEnd events."""

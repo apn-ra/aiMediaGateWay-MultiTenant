@@ -164,7 +164,7 @@ class AMIConnection:
         """Handle any AMI event to update statistics."""
         self.stats.last_event_at = timezone.now()
         self.stats.events_processed += 1
-        
+
     async def _start_ping_task(self):
         """Start periodic ping task to monitor connection health."""
         if self._ping_task:

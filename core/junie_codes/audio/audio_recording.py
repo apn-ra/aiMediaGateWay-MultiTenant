@@ -694,53 +694,51 @@ class AudioRecordingManager:
         except Exception as e:
             logger.error(f"Error listing session recordings {session_id}: {e}")
             return []
-    
-    async def _save_recording_to_db(self, recording_session: RecordingSession):
+
+    @staticmethod
+    async def _save_recording_to_db(recording_session: RecordingSession):
         """Save recording metadata to database"""
         try:
             # Get tenant and call session
-            tenant = await Tenant.objects.aget(tenant_id=recording_session.tenant_id)
-            call_session = await CallSession.objects.aget(session_id=recording_session.session_id)
-            
-            # Create AudioRecording instance
-            audio_recording = AudioRecording.objects.create(
+            tenant = await Tenant.objects.aget(id=recording_session.tenant_id)
+            call_session = await CallSession.objects.aget(channel_id=recording_session.session_id)
+
+            await asyncio.to_thread(
+                lambda: AudioRecording.objects.create(
                 recording_id=recording_session.recording_id,
                 tenant=tenant,
                 call_session=call_session,
                 file_path=recording_session.file_path or '',
-                file_size_bytes=recording_session.file_size_bytes,
+                file_size=recording_session.file_size_bytes,
                 duration_seconds=recording_session.duration_seconds,
-                format=recording_session.config.format.value,
+                audio_format=recording_session.config.format.value,
                 sample_rate=recording_session.config.sample_rate,
                 bit_depth=recording_session.config.bit_depth,
                 channels=recording_session.config.channels,
-                recording_started=recording_session.start_time,
-                recording_ended=recording_session.end_time,
-                metadata=recording_session.metadata,
+                recording_start_time=recording_session.start_time,
+                recording_end_time=recording_session.end_time,
                 status='recording'
+                )
             )
-            
-            await audio_recording.asave()
-            
+
         except Exception as e:
             logger.error(f"Error saving recording to database: {e}")
-    
-    async def _update_recording_in_db(self, recording_session: RecordingSession):
+
+    @staticmethod
+    async def _update_recording_in_db(recording_session: RecordingSession):
         """Update recording metadata in database"""
         try:
-            audio_recording = await AudioRecording.objects.aget(
-                recording_id=recording_session.recording_id
+            await asyncio.to_thread(
+                lambda: AudioRecording.objects.filter(
+                    recording_id=recording_session.recording_id
+                ).update(
+                    file_path=recording_session.file_path or '',
+                    file_size=recording_session.file_size_bytes,
+                    duration_seconds=recording_session.duration_seconds,
+                    recording_end_time=recording_session.end_time,
+                    status=recording_session.state.value
+                )
             )
-            
-            audio_recording.file_path = recording_session.file_path or ''
-            audio_recording.file_size_bytes = recording_session.file_size_bytes
-            audio_recording.duration_seconds = recording_session.duration_seconds
-            audio_recording.recording_ended = recording_session.end_time
-            audio_recording.metadata = recording_session.metadata
-            audio_recording.status = recording_session.state.value
-            
-            await audio_recording.asave()
-            
         except Exception as e:
             logger.error(f"Error updating recording in database: {e}")
     

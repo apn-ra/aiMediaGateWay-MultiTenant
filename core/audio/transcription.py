@@ -164,7 +164,7 @@ class AudioTranscriptionManager:
 
             self.streaming_config = riva.client.StreamingRecognitionConfig(
                 config=riva.client.RecognitionConfig(
-                    language_code=self.riva.map_language_to_riva(config.language),
+                    language_code= 'multi', #self.riva.map_language_to_riva(config.language),
                     model=config.model_name,
                     max_alternatives=1,
                     profanity_filter=config.filter_profanity,
@@ -221,8 +221,8 @@ class AudioTranscriptionManager:
         def audio_generator():
             try:
                 for audio_chunk in self.bridge.generator():
-                    # denoised_frame = audio_chunk.payload
-                    original_frame = audio_chunk.original_packet.payload
+                    original_frame = audio_chunk.payload
+                    # original_frame = audio_chunk.original_packet.payload
                     # original_frame = audio_chunk
 
                     # frame_size = len(original_frame)  # bytes per frame
@@ -231,7 +231,7 @@ class AudioTranscriptionManager:
                     # duration_per_frame = samples_per_frame / 16000
 
                     #riva.client.sleep_audio_length(audio_chunk=original_frame, time_to_sleep=duration_per_frame)
-                    logger.debug(f"Frame Size: { len(original_frame) }")
+                    # logger.debug(f"Frame Size: { len(original_frame) }")
                     yield original_frame
             except Exception as e:
                 logger.error(f"Error in audio generator: {e}")

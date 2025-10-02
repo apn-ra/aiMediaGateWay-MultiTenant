@@ -119,11 +119,13 @@ class AudioRecording(models.Model):
         ('alaw', 'A-law'),
     ]
 
+    recording_id = models.CharField(max_length=500, blank=True)
     call_session = models.ForeignKey(CallSession, on_delete=models.CASCADE, related_name='audio_recordings')
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='audio_recordings')
     file_path = models.CharField(max_length=500)
     file_size = models.BigIntegerField(null=True, blank=True)
     audio_format = models.CharField(max_length=10, choices=AUDIO_FORMAT_CHOICES, default='wav')
+    bit_depth = models.IntegerField(default=16)
     sample_rate = models.IntegerField(default=8000)
     channels = models.IntegerField(default=1)
     duration_seconds = models.FloatField(null=True, blank=True)
