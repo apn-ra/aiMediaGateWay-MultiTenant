@@ -7,7 +7,7 @@ import logging
 import signal
 from asgiref.sync import sync_to_async
 from django.core.management.base import BaseCommand
-from core.ami.events import AMIEventHandler
+from core.asterisk_events import AsteriskEventHandlers
 from core.models import Tenant  # Preserved if you need tenant logic
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,6 @@ class Command(BaseCommand):
         )
 
     async def handle_async(self, *args, **options):
-        event_handler = AMIEventHandler()
         tenants = await sync_to_async(list)(Tenant.objects.filter(is_active=True))
         tasks = {}
 
@@ -40,39 +39,17 @@ class Command(BaseCommand):
             loop.add_signal_handler(sig, shutdown)
 
         for tenant in tenants:
-            ami_connection = await event_handler.register_ami_handlers(tenant_id=tenant.id)
-            ari_connection = await event_handler.register_ari_handler(tenant_id=tenant.id)
-
-            # --- Start AMI connection ---
-            ami_connection_task = asyncio.create_task(ami_connection.connect(), name="ami-connection")
-            ari_connection_task = asyncio.create_task(ari_connection.client.connect_websocket(), name="ari-connection")
-
-            tasks[tenant.id] = {
-                "ami_connection": ami_connection_task,
-                "ari_connection": ari_connection_task,
-            }
+            tasks[tenant.id] = AsteriskEventHandlers(tenant_id=tenant.id)
+            await tasks[tenant.id].initialize()
 
         try:
-            logger.info("AMI event listener started.")
+            logger.info("AMI & ARI event listener started.")
             await stop_event.wait()  # Wait until a shutdown signal is received
         finally:
             logger.info("Shutting down gracefully...")
-
             for tenant in tenants:
-                tasks[tenant.id]["ami_connection"].cancel()
-                tasks[tenant.id]["ari_connection"].cancel()
-                try:
-                    await tasks[tenant.id]["ami_connection"]
-                    await tasks[tenant.id]["ari_connection"]
-                except asyncio.CancelledError:
-                    logger.info("AMI & ARI connection task cancelled.")
-
-            await event_handler.ami_manager.disconnect_all()
-            logger.info("AMI event listener stopped.")
-            await event_handler.rtp_integrator.stop()
-            logger.info("RTP Integrator stopped.")
-            await event_handler.ari_event_handler.ari_manager.disconnect_all()
-            logger.info("ARI event listener stopped.")
+                await tasks[tenant.id].disconnect()
+            logger.info("AMI & ARI event listener stopped.")
 
 
     def handle(self, *args, **options):

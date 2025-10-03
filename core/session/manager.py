@@ -140,7 +140,7 @@ class SessionManager:
             return 'callee'
         return 'caller'
 
-    async def create_session_from_ami_bridge_enter_event(self,tenant_id:int, message: Dict[str, Any]) -> CallSessionData:
+    async def convert_to_call_session_data(self,tenant_id:int, message: Dict[str, Any]) -> CallSessionData:
         unique = message.get('Uniqueid', str(uuid.uuid4()))
         asterisk_host = message.get('asterisk_host', 'localhost')
         rtp_endpoint_host = message.get('rtp_endpoint_host', 'localhost')

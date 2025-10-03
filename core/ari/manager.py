@@ -66,6 +66,7 @@ class ARIConnection:
                     logger.info(f"Attempting ARI connection for tenant {self.tenant_id} (attempt {retry_count + 1})")
 
                     await self.client.connect()
+
                     # Update connection stats
                     self.stats.connected = True
                     self.stats.connection_time = timezone.now()
@@ -87,6 +88,9 @@ class ARIConnection:
                         return False
             return False
 
+    async def connect_websocket(self):
+        await self.client.connect_websocket()
+
     async def disconnect(self):
         """Gracefully disconnect ARI client"""
         async with self._lock:
@@ -103,9 +107,6 @@ class ARIConnection:
                 # Close ARI connection
                 if self.client.is_connected:
                     await self.client.close()
-                    # await asyncio.get_event_loop().run_in_executor(
-                    #     None, lambda: self.client.close()
-                    # )
                     self.client = None
 
                 self.stats.connected = False

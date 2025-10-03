@@ -11,9 +11,9 @@ from core.ari.manager import get_ari_manager, ARIConnection
 
 class ARIEventHandler:
 
-    def __init__(self):
+    def __init__(self, tenant_id:int):
         self.rtp_integrator = None
-        self.tenant_id = None
+        self.tenant_id = tenant_id
         self.session_manager = None
         self.ari_manager = None
         self._tenant_cache = {}
@@ -27,11 +27,10 @@ class ARIEventHandler:
             'total': 0
         }
 
-    async def initialize(self, tenant_id: int = None):
+    async def initialize(self):
         """Initialize the event handler with managers."""
         self.session_manager = get_session_manager()
         self.ari_manager = get_ari_manager()
-        self.tenant_id = tenant_id
 
     async def register_handlers(self, tenant_id: int) -> ARIConnection:
         """Register all event handlers for a specific tenant."""

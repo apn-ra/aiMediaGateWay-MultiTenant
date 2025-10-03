@@ -19,9 +19,12 @@ import time
 from typing import Dict, List, Optional, Any, Callable, Tuple, Coroutine
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
+
+import audioop
 from django.utils import timezone
 from django.conf import settings
 from scipy.signal import resample_poly
+from ipaddress import ip_address
 import collections
 import numpy as np
 import webrtcvad
@@ -458,56 +461,62 @@ class AudioProcessor:
     async def process_packet(self, packet: RTPPacket, endpoint: RTPEndpoint, target_codec: str = None) -> Optional[AudioFrame]:
         """Process RTP packet into audio frame"""
         try:
+            pcm16_8k = self.ulaw2pcm16(packet.payload)
+            pcm16_16k = resample_poly(pcm16_8k, up=2, down=1).astype(np.int16)
+
+            # pcm16_8k = audioop.ulaw2lin(packet.payload, 2)
+            # pcm16_16k, _ = audioop.ratecv(pcm16_8k, 2, 1, 8000, 16000, None)
+
             # Get codec information
-            codec_info = AudioCodec.get_codec_info(packet.header.payload_type)
-            if not codec_info:
-                logger.warning(f"Unknown codec for payload type {packet.header.payload_type}")
-                return None
-
-            source_codec = codec_info['name']
-            target_codec = target_codec or source_codec
-
-            # Convert audio format if needed
-            processed_payload = await self._convert_audio_format(
-                packet.payload, source_codec, target_codec
-            )
-
-            if not processed_payload:
-                logger.warning(f"Failed to convert payload type {packet.header.payload_type}")
-                return None
+            # codec_info = AudioCodec.get_codec_info(packet.header.payload_type)
+            # if not codec_info:
+            #     logger.warning(f"Unknown codec for payload type {packet.header.payload_type}")
+            #     return None
+            #
+            # source_codec = codec_info['name']
+            # target_codec = target_codec or source_codec
+            #
+            # # Convert audio format if needed
+            # processed_payload = await self._convert_audio_format(
+            #     packet.payload, source_codec, target_codec
+            # )
+            #
+            # if not processed_payload:
+            #     logger.warning(f"Failed to convert payload type {packet.header.payload_type}")
+            #     return None
 
             #Normalize audio level
-            payload = self.normalize_audio_level(payload=processed_payload, target_level=0.1)
+            # payload = self.normalize_audio_level(payload=processed_payload, target_level=0.1)
 
             #Denoise and VAD
-            data = await self._denoise_payload(payload=payload)
+            # data = await self._denoise_payload(payload=payload)
 
-            if not data:
-                logger.warning(f"Failed to denoise payload type {packet.header.payload_type}")
-                return None
-
-            if not data.denoised_bytes:
-                logger.warning("Denoised bytes is empty or None")
-                return None
+            # if not data:
+            #     logger.warning(f"Failed to denoise payload type {packet.header.payload_type}")
+            #     return None
+            #
+            # if not data.denoised_bytes:
+            #     logger.warning("Denoised bytes is empty or None")
+            #     return None
 
             # Create AudioFrame for downstream processing
             frame = AudioFrame(
                 sequence_number=packet.header.sequence_number,
                 timestamp=packet.header.timestamp,
-                payload=data.denoised_bytes,
+                payload= pcm16_16k.tobytes(), #data.denoised_bytes,
                 codec=target_codec,
                 processed_time=timezone.now(),
                 sample_rate=endpoint.sample_rate,
                 channels=endpoint.channels,
                 session_id=endpoint.session_id,
                 original_packet=packet,
-                is_speech=data.is_speech,
-                avg_speech_prob=data.avg_speech_prob,
+                is_speech= False, #data.is_speech,
+                avg_speech_prob= 0.0 #data.avg_speech_prob,
             )
 
             # General stats
             self.stats.frames_processed += 1
-            self.stats.total_bytes_processed += len(data.denoised_bytes)
+            self.stats.total_bytes_processed += len(pcm16_16k.tobytes())  #len(data.denoised_bytes)
 
             return frame
         except Exception as e:
@@ -516,6 +525,26 @@ class AudioProcessor:
 
             return None
 
+    @staticmethod
+    def ulaw2pcm16(ulaw_bytes: bytes) -> np.ndarray:
+        """Convert µ-law bytes to PCM16, bit-identical to audioop.ulaw2lin()."""
+        MULAW_MAX = 0x1FFF
+        BIAS = 0x84  # 132
+        CLIP = 32635
+
+        mulaw_decode_table = np.zeros(256, dtype=np.int16)
+        for i in range(256):
+            mu = ~i & 0xFF
+            sign = mu & 0x80
+            exponent = (mu >> 4) & 0x07
+            mantissa = mu & 0x0F
+            sample = ((mantissa << 4) + BIAS) << exponent
+            if sign != 0:
+                sample = -sample
+            mulaw_decode_table[i] = np.int16(sample)
+
+        ulaw = np.frombuffer(ulaw_bytes, dtype=np.uint8)
+        return mulaw_decode_table[ulaw]
 
     async def _denoise_payload(self, payload: bytes) ->  Optional[DenoiserData]:
         """
@@ -689,30 +718,29 @@ class AudioProcessor:
 
     @staticmethod
     def _ulaw2lin(payload: bytes) -> bytes:
-        """Convert μ-law encoded audio to linear PCM using numpy"""
+        """Convert μ-law encoded audio to linear PCM (16-bit) using NumPy"""
         try:
-            # Convert bytes to numpy array of uint8
+            # Convert bytes to numpy array
             ulaw_data = np.frombuffer(payload, dtype=np.uint8)
 
-            # μ-law to linear conversion algorithm
-            # Flip all bits except sign bit
-            sign = (ulaw_data & 0x80) >> 7
-            magnitude = ulaw_data & 0x7F
+            # μ-law bytes are bit-inverted
+            ulaw_data = ~ulaw_data & 0xFF
 
-            # Decode the magnitude
-            exp = (magnitude & 0x70) >> 4
-            mantissa = magnitude & 0x0F
+            # Extract sign, exponent, and mantissa
+            sign = ulaw_data & 0x80
+            exponent = (ulaw_data >> 4) & 0x07
+            mantissa = ulaw_data & 0x0F
 
-            # Calculate linear value
-            linear = np.where(exp == 0,
-                              (mantissa << 4) + 132,
-                              ((mantissa << 4) + 132) << (exp - 1))
+            # Reconstruct the linear PCM value
+            linear = ((mantissa << 3) + 0x84) << exponent  # 0x84 = 132 bias
 
             # Apply sign
-            linear = np.where(sign == 1, -linear, linear)
+            linear = np.where(sign != 0, -linear, linear)
 
-            # Convert to 16-bit signed integers
-            return linear.astype(np.int16).tobytes()
+            # Clip and convert to int16
+            pcm = np.clip(linear, -32768, 32767).astype(np.int16)
+
+            return pcm.tobytes()
 
         except Exception as e:
             logger.error(f"Error in ulaw2lin conversion: {e}")
@@ -847,17 +875,15 @@ class AudioProcessor:
 
     @staticmethod
     def _lin_to_slin16(payload: bytes) -> bytes:
-        """Convert linear PCM (8kHz, 16-bit) to SLIN16 (16kHz, 16-bit) using numpy"""
+        """High-quality 8kHz -> 16kHz resampling using polyphase filtering."""
         try:
-            # Convert bytes to numpy array of int16
             linear_data = np.frombuffer(payload, dtype=np.int16)
-            
-            # Upsample from 8kHz to 16kHz by duplicating each sample
-            # This is simple sample and hold - more sophisticated interpolation could be added
-            upsampled_data = np.repeat(linear_data, 2)
-            
+
+            # Upsample from 8kHz -> 16kHz (factor 2:1)
+            upsampled_data = resample_poly(linear_data, up=2, down=1)
+
             return upsampled_data.astype(np.int16).tobytes()
-            
+
         except Exception as e:
             logger.error(f"Error in lin_to_slin16 conversion: {e}")
             return payload
@@ -1364,10 +1390,94 @@ class AudioCodec:
         return codec_name.lower() in cls.CODECS
 
 
+PCAP_GLOBAL_HEADER = struct.pack(
+    "<IHHIIII",
+    0xa1b2c3d4,  # magic
+    2, 4,        # version
+    0, 0,        # timezone/sigfigs
+    65535,       # snaplen
+    1            # linktype: Ethernet
+)
+
+### Linux Commands for troubleshooting ###
+# ffmpeg -f s16le -ar 8000 -ac 1 -i extmedia_payload.raw extmedia_payload8hrz.wav
+# sudo tcpdump -i any udp port 10000 -w externalmedia02.pcap
+
+
+class PacketCapture:
+    """Packet capture utilities For Troubleshooting"""
+    def __init__(self, enable = False):
+        self.enable = enable
+        if self.enable:
+            self.dump_file = open(f'recordings/capture_{timezone.now().strftime("%d-%m-%Y-%H-%M-%S")}.pcap', 'wb')
+            self.dump_file.write(PCAP_GLOBAL_HEADER)
+
+    @staticmethod
+    def ethernet_header():
+        # dummy MACs
+        dst = b"\xaa\xbb\xcc\xdd\xee\xff"
+        src = b"\x11\x22\x33\x44\x55\x66"
+        eth_type = b"\x08\x00"  # IPv4
+        return dst + src + eth_type
+
+    @staticmethod
+    def ipv4_header(payload_len, src_ip="10.0.0.1", dst_ip="10.0.0.2"):
+        version_ihl = (4 << 4) | 5
+        tos = 0
+        total_length = 20 + 8 + payload_len
+        ident = 54321
+        flags_offset = 0
+        ttl = 64
+        proto = 17  # UDP
+        checksum = 0
+        src = ip_address(src_ip).packed
+        dst = ip_address(dst_ip).packed
+        return struct.pack("!BBHHHBBH4s4s",
+                           version_ihl, tos, total_length, ident,
+                           flags_offset, ttl, proto, checksum, src, dst)
+
+    @staticmethod
+    def udp_header(payload_len, src_port=5000, dst_port=4000):
+        length = 8 + payload_len
+        checksum = 0
+        return struct.pack("!HHHH", src_port, dst_port, length, checksum)
+
+    @staticmethod
+    def pcap_packet(packet_data):
+        ts = time.time()
+        ts_sec = int(ts)
+        ts_usec = int((ts - ts_sec) * 1e6)
+        incl_len = orig_len = len(packet_data)
+        return struct.pack("<IIII", ts_sec, ts_usec, incl_len, orig_len) + packet_data
+
+    def write_packet(self, data, addr, local_ip, local_port):
+        if self.enable:
+            eth = self.ethernet_header()
+            ip = self.ipv4_header(
+                payload_len=len(data),
+                src_ip=addr[0],
+                dst_ip=local_ip
+            )
+
+            udp = self.udp_header(
+                payload_len=len(data),
+                src_port=addr[1],
+                dst_port=local_port,
+            )
+
+            pkt = eth + ip + udp + data
+            self.dump_file.write(self.pcap_packet(pkt))
+
+    def close(self):
+        if self.enable:
+            self.dump_file.close()
+
 class RTPServerProtocol(asyncio.DatagramProtocol):
     """UDP protocol handler for RTP packets"""
 
     def __init__(self, rtp_server):
+        self.packet_capture = PacketCapture()
+        self.local_ip = None
         packet_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self.audio_buffer = AdaptiveAudioBuffer(queue=packet_queue)
         self.local_port = 0
@@ -1379,26 +1489,35 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
         self.transport = transport
         sock = transport.get_extra_info('socket')
         if sock:
+            self.local_ip = sock.getsockname()[0]
             self.local_port = sock.getsockname()[1]
             logger.info(f"RTP server listening on {sock.getsockname()}")
         asyncio.create_task(self._consumer_task())
 
     def connection_lost(self, exc):
-        """Called when RTP socket is closed"""
+        """Called when the RTP socket is closed"""
         self.local_port = 0
+        self.packet_capture.close()
         asyncio.create_task(self.audio_buffer.queue.put(None))
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         """Handle incoming RTP packets"""
         try:
+            self.packet_capture.write_packet(
+                data=data,
+                addr=addr,
+                local_ip=self.local_ip,
+                local_port=self.local_port
+            )
+
             # Parse RTP packet
             packet = self._parse_rtp_packet(data, addr)
             if packet:
-                # asyncio.create_task(self.rtp_server.process_rtp_packet(packet))
+                # self.dump_file.write(packet.payload)
+                # sox -t raw -r 8000 -e mu-law -c 1 input.raw output.wav
                 self.audio_buffer.add_packet(packet)
         except Exception as e:
             logger.error(f"Error processing RTP packet from {addr}: {e}")
-
 
     async def _consumer_task(self):
         """
@@ -1422,7 +1541,6 @@ class RTPServerProtocol(asyncio.DatagramProtocol):
         except asyncio.CancelledError:
             logger.debug("RTP server consumer task cancelled")
             pass
-
 
     def _parse_rtp_packet(self, data: bytes, addr: Tuple[str, int]) -> Optional[RTPPacket]:
         """Parse raw UDP data into RTP packet structure"""

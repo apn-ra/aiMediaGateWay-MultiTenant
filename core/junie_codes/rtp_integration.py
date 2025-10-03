@@ -56,6 +56,7 @@ class RTPSessionIntegrator:
     """
     
     def __init__(self, config: RTPIntegrationConfig = None):
+        self.dump_file = None
         self.audio_processor = AudioProcessor()
         self.config = config or RTPIntegrationConfig()
         self.session_manager = get_session_manager()
@@ -136,6 +137,8 @@ class RTPSessionIntegrator:
     async def integrate_session(self, session_id: str, routing_decision=None) -> bool:
         """Integrate a session with RTP server"""
         try:
+            self.dump_file = open(f'recordings/capture_{timezone.now().strftime("%d-%m-%Y-%H-%M-%S")}.raw', "wb")
+            
             # Get session data
             session = await self.session_manager.get_session(session_id)
             if not session:
@@ -178,18 +181,18 @@ class RTPSessionIntegrator:
                     # model_name='conformer-en-US-asr-streaming-asr-bls-ensemble'
                 )
 
-                transcription_manager = AudioTranscriptionManager()
-                transcription_manager.start_stream(
-                    session_id=session_id,
-                    config=config,
-                    callback=self.transcription_result
-                )
+                # transcription_manager = AudioTranscriptionManager()
+                # transcription_manager.start_stream(
+                #     session_id=session_id,
+                #     config=config,
+                #     callback=self.transcription_result
+                # )
 
-                recording_id = await self.audio_recording.start_recording(
-                    session_id=session_id,
-                    tenant_id=2,
-                    config=None
-                )
+                # recording_id = await self.audio_recording.start_recording(
+                #     session_id=session_id,
+                #     tenant_id=2,
+                #     config=None
+                # )
 
                 # Initialize quality analyzer
                 audio_quality_analyzer = self.quality_manager.create_analyzer(session_id)
@@ -207,7 +210,7 @@ class RTPSessionIntegrator:
                 'audio_quality_analyzer': audio_quality_analyzer,
                 'audio_streaming_registered': audio_streaming_registered,
                 'recording_id': recording_id,
-                'transcription_manager': transcription_manager,
+                # 'transcription_manager': transcription_manager,
                 'created_at': timezone.now(),
                 'last_sync': timezone.now(),
                 'stats': {
@@ -243,6 +246,7 @@ class RTPSessionIntegrator:
                 logger.debug(f"Session {session_id} not integrated with RTP")
                 return True
 
+            self.dump_file.close()
             session = await self.session_manager.get_session(session_id)
             logger.info(f"Channel Name: {session.channel.name}")
             logger.info(f"Integration Status: {await self.get_integration_status(session_id)}\n\n")
@@ -261,8 +265,8 @@ class RTPSessionIntegrator:
             if integration_data.get('audio_quality_analyzer'):
                 self.quality_manager.remove_analyzer(session_id)
 
-            if integration_data.get('transcription_manager'):
-                integration_data.get('transcription_manager').stop_stream()
+            # if integration_data.get('transcription_manager'):
+            #     integration_data.get('transcription_manager').stop_stream()
 
             if integration_data.get('recording_id'):
                 await self.audio_recording.stop_recording(recording_id=integration_data.get('recording_id'))
@@ -323,11 +327,12 @@ class RTPSessionIntegrator:
                         stats['bytes_processed'] += packet.size
                     
                         # Convert RTP packet to AudioFrame for audio processing
-                        # audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
-                        audio_frame = self._convert_rtp_to_audio_frame(packet=packet, endpoint=endpoint)
+                        audio_frame = await self.audio_processor.process_packet(packet=packet, endpoint=endpoint, target_codec='slin16')
+                        # audio_frame = self._convert_rtp_to_audio_frame(packet=packet, endpoint=endpoint)
                         if not audio_frame:
                             return
 
+                        self.dump_file.write(audio_frame.payload)
                         # transcript = self.active_integrations[endpoint.session_id].get('transcription_manager')
                         # if transcript:
                             # logger.debug(f"Speech Probability: {round(audio_frame.avg_speech_prob, 2)}")

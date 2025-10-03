@@ -5,12 +5,11 @@
 import logging
 import asyncio
 from core.ami.manager import AMIConnection
-from core.session.manager import get_session_manager
-from core.junie_codes.rtp_integration import get_rtp_integrator
+from core.session.manager import SessionManager
 from core.ari.manager import ARIConnection
 from core.ami.manager import get_ami_manager
 from core.ari.events import ARIEventHandler
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from django.utils import timezone
 from decouple import config
 
@@ -19,12 +18,11 @@ logger = logging.getLogger(__name__)
 
 class AMIEventHandler:
 
-    def __init__(self):
-        self.bridge_id = None
-        self.rtp_integrator = None
-        self.ari_event_handler = None
-        self.tenant_id = None
-        self.session_manager = None
+    def __init__(self, tenant_id:int, session_manager:SessionManager = None):
+        self.bridges = {}
+        self._ami_task = None
+        self.tenant_id = tenant_id
+        self.session_manager = session_manager
         self.ami_manager = None
         self._tenant_cache = {}
         self._event_statistics = {
@@ -36,51 +34,60 @@ class AMIEventHandler:
             'total': 0
         }
 
-    async def initialize(self, tenant_id:int):
+    async def initialize(self):
         """Initialize the event handler with managers."""
-        self.rtp_integrator = get_rtp_integrator()
-        self.session_manager = get_session_manager()
         self.ami_manager = await get_ami_manager()
-        self.ari_event_handler = ARIEventHandler()
-        self.tenant_id = tenant_id
 
-        await self.rtp_integrator.start()
+        await asyncio.sleep(0.01)
+        ami_connection = await self.register_ami_handlers()
 
-    async def register_ari_handler(self, tenant_id:int) -> ARIConnection:
-        """Register all ari event handlers for a specific tenant."""
-        return await self.ari_event_handler.register_handlers(tenant_id=tenant_id)
+        self._ami_task = asyncio.create_task(ami_connection.connect(), name="ami-connection")
 
-    async def register_ami_handlers(self, tenant_id: int) -> AMIConnection:
+    async def disconnect(self):
+        """Disconnect all event handlers."""
+
+        if self._ami_task and not self._ami_task.done():
+            self._ami_task.cancel()
+
+        try:
+            await self._ami_task
+        except asyncio.CancelledError:
+            logger.info("AMI & ARI connection task cancelled.")
+
+        await self.ami_manager.disconnect_all()
+        logger.info("Event handlers disconnected")
+
+    async def register_ami_handlers(self) -> AMIConnection:
         """Register all ami event handlers for a specific tenant."""
-        await self.initialize(tenant_id=tenant_id)
 
         # Register event handlers with the AMI manager
         await self.ami_manager.register_event_handler(
-            tenant_id, 'BridgeEnter', self.handle_bridge_enter
+            self.tenant_id, 'BridgeEnter', self.handle_bridge_enter
         )
 
         await self.ami_manager.register_event_handler(
-            tenant_id, 'Hangup', self.handle_hangup
+            self.tenant_id, 'Hangup', self.handle_hangup
         )
 
-        logger.info(f"Registered AMI event handlers for tenant {tenant_id}")
-        return self.ami_manager.connections[tenant_id]
+        if self.tenant_id not in self.bridges:
+            self.bridges[self.tenant_id] = []
+
+        logger.info(f"Registered AMI event handlers for tenant {self.tenant_id}")
+        return self.ami_manager.connections[self.tenant_id]
 
     async def handle_bridge_enter(self, manager, message: Dict[str, Any]):
         """Handle Bridge enter events."""
 
         if self.session_manager.is_inbound_channel(message.get('channel')):
-            session_data = await self.session_manager.create_session_from_ami_bridge_enter_event(self.tenant_id, message)
+            session_data = await self.session_manager.convert_to_call_session_data(self.tenant_id, message)
 
             session_data.rtp_endpoint_host = config('AI_MEDIA_GATEWAY_HOST')
             session_data.asterisk_host = self.ami_manager.connections[self.tenant_id].config.host
 
-            if self.bridge_id is None:
-                logger.info(f"Bridge Enter Event: {session_data}")
-                self.bridge_id = session_data.bridge_id
+            if len(self.bridges[self.tenant_id]) == 0:
+                self.bridges[self.tenant_id].append(session_data.bridge_id)
 
                 session_id = await self.session_manager.create_session(session_data=session_data)
-
                 client = self.ari_event_handler.ari_manager.connections[self.tenant_id].client
                 await client.snoop_channel(
                     channel_id=session_data.channel.id,
@@ -120,11 +127,7 @@ class AMIEventHandler:
         if self.session_manager.is_inbound_channel(message.get('channel')):
             # Get an existing session
             session = await self.session_manager.get_session(uniqueid)
-            if session and self.bridge_id == session.bridge_id:
-
-                # Hangup ExternalMedia Channel
-                client = self.ari_event_handler.ari_manager.connections[self.tenant_id].client
-                # await client.hangup_channel(channel_id=session.external_media_channel_id, reason='normal')
+            if session and session.bridge_id in self.bridges[self.tenant_id]:
 
                 metadata = session.metadata
                 metadata['hangup_code'] = message.get('Cause')
@@ -137,8 +140,6 @@ class AMIEventHandler:
                 }
 
                 await self.session_manager.update_session(uniqueid, updates)
-
-                await self.rtp_integrator.de_integrate_session(session_id=uniqueid)
 
                 # Schedule session cleanup after a delay
                 asyncio.create_task(self._delayed_session_cleanup(uniqueid, delay=300))  # 5 minutes
@@ -153,14 +154,3 @@ class AMIEventHandler:
             logger.info(f"Cleaned up session {session_id} after {delay} seconds")
         except Exception as e:
             logger.error(f"Error in delayed cleanup for session {session_id}: {e}")
-
-
-    async def handle_new_channel(self, manager, message: Dict[str, Any]):
-        """
-        Handle New channel events for early call detection.
-
-        This is triggered when a new channel is created in Asterisk,
-        allowing us to create sessions before the call is answered.
-        """
-
-        logger.info("New channel event")

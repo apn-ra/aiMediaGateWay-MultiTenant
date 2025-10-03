@@ -841,7 +841,7 @@ class ARIClient:
         # Retry logic with exponential backoff
         for attempt in range(self.config.retry_attempts + 1):
             try:
-                logger.debug(f"{method} {url} (attempt {attempt + 1}/{self.config.retry_attempts + 1})")
+                # logger.debug(f"{method} {url} (attempt {attempt + 1}/{self.config.retry_attempts + 1})")
 
                 async with self.session.request(
                         method,
