@@ -22,9 +22,9 @@ from django.utils import timezone
 from django.contrib.auth.models import AnonymousUser
 
 # Import our components
-from core.junie_codes.session import get_session_manager
+from core.session.manager import get_session_manager
 from core.junie_codes.audio.audio_streaming import get_streaming_manager, StreamingProtocol, StreamQuality, StreamingFormat
-from core.junie_codes.audio import get_recording_manager
+from core.junie_codes.audio.audio_recording import get_recording_manager
 from core.junie_codes.audio.audio_quality import get_quality_manager
 
 logger = logging.getLogger(__name__)

@@ -35,7 +35,7 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 
 # Import our audio processing components
 from core.junie_codes.audio.audio_conversion import AudioConverter, AudioFormat, AudioSpec
-from core.junie_codes.rtp_server import AudioFrame
+from core.rtp_server import AudioFrame
 from core.session.manager import get_session_manager
 
 logger = logging.getLogger(__name__)

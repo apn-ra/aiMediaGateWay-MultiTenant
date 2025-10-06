@@ -19,7 +19,6 @@ import logging
 import math
 import struct
 import numpy as np
-import soundfile as sf
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,7 +26,7 @@ from enum import Enum
 from collections import deque
 
 from django.utils import timezone
-from core.junie_codes.rtp_server import AudioFrame
+from core.rtp_server import AudioFrame
 
 logger = logging.getLogger(__name__)
 

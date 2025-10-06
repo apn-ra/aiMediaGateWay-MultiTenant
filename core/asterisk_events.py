@@ -8,8 +8,8 @@ from typing import Dict, Any
 from django.utils import timezone
 from core.ami.manager import get_ami_manager
 from core.ari.manager import get_ari_manager
-from core.junie_codes.rtp_integration import get_rtp_integrator
-from core.session.manager import get_session_manager
+from core.rtp_integration import get_rtp_integrator
+from core.session.manager import get_session_manager, CallSessionData
 from decouple import config
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,6 @@ class AsteriskEventHandlers:
     environment. It initializes managers, registers event handlers, manages session lifecycles,
     and performs session cleanup tasks.
 
-    :ivar bridges: A dictionary to track the active bridges for each tenant.
-    :type bridges: dict
     :ivar tenant_id: The ID of the tenant for which the event handlers are configured.
     :type tenant_id: int
     :ivar session_manager: Responsible for managing sessions and interactions with sessions.
@@ -36,7 +34,6 @@ class AsteriskEventHandlers:
     """
     def __init__(self, tenant_id:int):
         self.rtp_integrator = None
-        self.bridges = {}
         self.tenant_id = tenant_id
         self._ari_task = None
         self._ami_task = None
@@ -98,9 +95,6 @@ class AsteriskEventHandlers:
             self.tenant_id, 'Hangup', self.handle_ami_hangup
         )
 
-        if self.tenant_id not in self.bridges:
-            self.bridges[self.tenant_id] = []
-
     async def handle_StasisStart(self, event_data):
         """Handle StasisStart events."""
         channel = event_data['channel']
@@ -127,7 +121,7 @@ class AsteriskEventHandlers:
 
                # Update session data
                await self.session_manager.update_session(session.session_id, {
-                       'snoop_channel_id': ' ',
+                       'snoop_channel_id': channel_id,
                        'external_media_channel_id': em_channel.id
                })
 
@@ -139,19 +133,12 @@ class AsteriskEventHandlers:
     async def handle_ami_bridge_enter(self, manager, message: Dict[str, Any]):
         """Handle Bridge enter events."""
         if self.session_manager.is_inbound_channel(message.get('channel')):
-            session_data = await self.session_manager.convert_to_call_session_data(
-                tenant_id=self.tenant_id,
-                message=message
-            )
+            session_data = await self._create_call_session(message)
 
-            session_data.rtp_endpoint_host = config('AI_MEDIA_GATEWAY_HOST')
-            session_data.asterisk_host = self.ami_manager.connections[self.tenant_id].config.host
+            session_id = await self.session_manager.create_session(session_data=session_data)
+            client = self.ari_manager.connections[self.tenant_id].client
 
-            if len(self.bridges[self.tenant_id]) == 0:
-                self.bridges[self.tenant_id].append(session_data.bridge_id)
-
-                session_id = await self.session_manager.create_session(session_data=session_data)
-                client = self.ari_manager.connections[self.tenant_id].client
+            if session_data.channel.dialplan.exten != '':
                 await client.snoop_channel(
                     channel_id=session_data.channel.id,
                     spy='both',
@@ -169,27 +156,25 @@ class AsteriskEventHandlers:
         if self.session_manager.is_inbound_channel(message.get('channel')):
             # Get an existing session
             session = await self.session_manager.get_session(uniqueid)
-            if session and session.bridge_id in self.bridges[self.tenant_id]:
-                await self.rtp_integrator.de_integrate_session(session_id=session.session_id)
-
-                try:
-                    await self.ari_manager.connections[self.tenant_id].client.hangup_channel(
-                        channel_id=session.external_media_channel_id,
-                        reason='normal'
-                    )
-                except Exception as e:
-                    logger.error(f"Error in Hangup on externalMedia : {e}")
+            if session:
+                if session.channel.dialplan.exten != '':
+                    await self.rtp_integrator.de_integrate_session(session_id=session.session_id)
+                    try:
+                        await self.ari_manager.connections[self.tenant_id].client.hangup_channel(
+                            channel_id=session.external_media_channel_id,
+                            reason='normal'
+                        )
+                    except Exception as e:
+                        logger.error(f"Error in Hangup on externalMedia : {e}")
 
                 metadata = session.metadata
                 metadata['hangup_code'] = message.get('Cause')
                 metadata['hangup_cause'] = message.get('Cause-txt', '')
-
                 updates = {
                     'status': 'completed',
                     'call_end_time': timezone.now(),
                     'metadata': metadata,
                 }
-
                 await self.session_manager.update_session(uniqueid, updates)
 
                 # Schedule session cleanup after a delay
@@ -205,3 +190,14 @@ class AsteriskEventHandlers:
             logger.info(f"Cleaned up session {session_id} after {delay} seconds")
         except Exception as e:
             logger.error(f"Error in delayed cleanup for session {session_id}: {e}")
+
+    async def _create_call_session(self, message: Dict[str, Any]) -> CallSessionData:
+        """Create call session."""
+        session_data = await self.session_manager.convert_to_call_session_data(
+            tenant_id=self.tenant_id,
+            message=message
+        )
+
+        session_data.rtp_endpoint_host = config('AI_MEDIA_GATEWAY_HOST')
+        session_data.asterisk_host = self.ami_manager.connections[self.tenant_id].config.host
+        return session_data

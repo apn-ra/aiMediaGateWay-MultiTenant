@@ -8,6 +8,8 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 """
 
 import os
+import aiMediaGateway.routing
+from channels.security.websocket import OriginValidator
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
@@ -18,8 +20,12 @@ django_asgi_app = get_asgi_application()
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,
-    # WebSocket support (add routing here later)
-    # "websocket": AuthMiddlewareStack(
-    #     URLRouter(websocket_urlpatterns)
-    # ),
+    "websocket": OriginValidator(
+        AuthMiddlewareStack(
+            URLRouter(
+                aiMediaGateway.routing.websocket_urlpatterns
+            )
+        ),
+        ['pbx01.apntelecom.com', 'pbx01.apntelecom.com:8080'],
+    )
 })

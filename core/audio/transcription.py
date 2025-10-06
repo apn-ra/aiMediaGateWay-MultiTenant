@@ -6,7 +6,8 @@ import json
 import logging
 import asyncio
 import threading
-from typing import Callable, List, Any
+from dataclasses import dataclass, field
+from typing import Callable, List, Any, Optional
 from django.conf import settings
 from django.utils import timezone
 
@@ -17,6 +18,31 @@ logger = logging.getLogger(__name__)
 
 import riva.client
 from riva.client.proto import riva_asr_pb2
+
+@dataclass
+class WordInfo:
+    """Word information"""
+    start_time_seconds: float
+    end_time_seconds: float
+    word: str
+    confidence: float
+    speaker_id: Optional[str] = None
+
+@dataclass
+class TranscriptionSegment:
+    """Individual transcription segment/word"""
+    transcript_id: Optional[str] = None
+    session_id: Optional[str] = None
+    text: Optional[str] = None
+    provider: Optional[TranscriptionProvider] = None
+    language_detected: Optional[str] = 'en-US'
+    segments: List[WordInfo] = field(default_factory=list)
+    start_time_seconds: Optional[float] = 0.0
+    end_time_seconds: Optional[float] = 0.0
+    confidence: Optional[float] = 0.0
+    stability: Optional[float] = 0.0
+    speaker_id: Optional[str] = None
+    is_final: Optional[bool] = False
 
 class AsyncToSyncStream:
     def __init__(self):
@@ -164,7 +190,7 @@ class AudioTranscriptionManager:
 
             self.streaming_config = riva.client.StreamingRecognitionConfig(
                 config=riva.client.RecognitionConfig(
-                    language_code= 'multi', #self.riva.map_language_to_riva(config.language),
+                    language_code= self.riva.map_language_to_riva(config.language),
                     model=config.model_name,
                     max_alternatives=1,
                     profanity_filter=config.filter_profanity,
@@ -221,54 +247,34 @@ class AudioTranscriptionManager:
         def audio_generator():
             try:
                 for audio_chunk in self.bridge.generator():
-                    original_frame = audio_chunk.payload
-                    # original_frame = audio_chunk.original_packet.payload
-                    # original_frame = audio_chunk
-
-                    # frame_size = len(original_frame)  # bytes per frame
-                    # bytes_per_sample = 2  # 16-bit = 2 bytes
-                    # samples_per_frame = frame_size // bytes_per_sample
-                    # duration_per_frame = samples_per_frame / 16000
-
-                    #riva.client.sleep_audio_length(audio_chunk=original_frame, time_to_sleep=duration_per_frame)
-                    # logger.debug(f"Frame Size: { len(original_frame) }")
-                    yield original_frame
+                    yield audio_chunk.payload
             except Exception as e:
                 logger.error(f"Error in audio generator: {e}")
                 raise
 
-        riva.client.print_streaming(
-            responses=self.riva.service.streaming_response_generator(
-                audio_chunks=audio_generator(),
-                streaming_config=self.streaming_config,
-            ),
-            show_intermediate=True,
-            additional_info="time" if (self.config.word_time_offsets or self.config.speaker_diarization) else (
-                "confidence" if self.config.print_confidence else "no"),
-            word_time_offsets=self.config.word_time_offsets or self.config.speaker_diarization,
-            speaker_diarization=self.config.speaker_diarization,
-        )
+        for resp in self.riva.service.streaming_response_generator(
+                audio_chunks=audio_generator(), streaming_config=self.streaming_config):
 
-        # for resp in self.riva.service.streaming_response_generator(
-        #         audio_chunks=audio_generator(),
-        #         streaming_config=self.streaming_config,
-        #     ):
-        #     for result in resp.results:
-        #         if not result.alternatives:
-        #             continue
-        #         alt = result.alternatives[0]
-        #         if result.is_final and alt.words:
-        #             # logger.debug(f"Final Transcription Result: {result}")
-        #             self.callback(TranscriptionResult(
-        #                 transcription_id=self.session_id,
-        #                 session_id=self.session_id,
-        #                 provider=TranscriptionProvider.NVIDIA_RIVA,
-        #                 text=result.alternatives[0].transcript,
-        #                 language_detected='en-US',
-        #                 confidence_average= result.alternatives[0].confidence,
-        #                 segments= result.alternatives[0].words,
-        #                 processing_time_seconds= 0.0,
-        #                 audio_duration_seconds=0.0,
-        #                 created_at=timezone.now(),
-        #                 success=True,
-        #             ))
+            transcript = TranscriptionSegment(
+                transcript_id=resp.id,
+                session_id=self.session_id
+            )
+
+            for result in resp.results:
+                transcript.is_final = result.is_final
+                transcript.stability = round(result.stability, 2)
+
+                for alternative in result.alternatives:
+                    transcript.text = alternative.transcript
+                    transcript.confidence = round(alternative.confidence, 2)
+
+                    for w in alternative.words:
+                        transcript.segments.append(WordInfo(
+                            start_time_seconds=w.start_time,
+                            end_time_seconds=w.end_time,
+                            word=w.word,
+                            confidence=round(w.confidence, 2),
+                            speaker_id=getattr(w, "speaker_tag", None)
+                        ))
+                    self.callback(transcript)
+

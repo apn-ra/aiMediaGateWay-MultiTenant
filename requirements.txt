@@ -17,3 +17,4 @@ webrtcvad-wheels==2.0.14
 nemo_toolkit[asr]
 torch==2.8.0
 torchaudio==2.8.0
+djangorestframework==3.16.1

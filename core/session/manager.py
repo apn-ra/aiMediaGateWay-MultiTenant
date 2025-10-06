@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class DialplanData:
     """Dialplan data structure"""
     context: str
-    exten: str
     priority: str
+    exten: Optional[str] = None
     app_name: Optional[str] = None
     app_data: Optional[str] = None
 
@@ -172,7 +172,7 @@ class SessionManager:
                     number=message.get('ConnectedIDNum', '')
                 ),
                 dialplan=DialplanData(
-                    exten=message.get('Exten', ''),
+                    exten=message.get('Exten', None),
                     context=message.get('Context'),
                     priority=message.get('Priority'),
                 )
@@ -276,7 +276,7 @@ class SessionManager:
                     channel_id=session_data.channel.id,
                     caller_id_name=session_data.channel.caller.number or '',
                     caller_id_number=session_data.channel.caller.name or '',
-                    dialed_number=session_data.channel.dialplan.exten or '',
+                    dialed_number=session_data.channel.dialplan.exten or None,
                     snoop_channel_id=session_data.snoop_channel_id,
                     external_media_channel_id=session_data.external_media_channel_id,
                     call_type=session_data.call_type,
