@@ -39,6 +39,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django_extensions',
     'rest_framework',
+    'rest_framework_simplejwt',
+    'django_filters',
+    'drf_spectacular',
+    'corsheaders',
     'channels',
     'core',
     'ari',
@@ -46,6 +50,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -53,8 +58,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # Multi-tenant middleware (to be implemented)
-    # 'core.middleware.TenantMiddleware',
+    # Multi-tenant middleware for API isolation
+    'core.middleware.TenantAPIMiddleware',
 ]
 
 ROOT_URLCONF = 'aiMediaGateway.urls'
@@ -83,6 +88,176 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
     },
+}
+
+# Django REST Framework Configuration
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'core.authentication.TenantAPIKeyAuthentication',
+        'core.authentication.SignedRequestAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 25,
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_VERSIONING_CLASS': 'rest_framework.versioning.NamespaceVersioning',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# JWT Configuration
+from datetime import timedelta
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+}
+
+# CORS Configuration
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
+
+# API Documentation Configuration
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'aiMediaGateway API',
+    'DESCRIPTION': 'Multi-tenant Asterisk PBX management system with real-time audio streaming capabilities',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'COMPONENT_NO_READ_ONLY_REQUIRED': True,
+    'SCHEMA_PATH_PREFIX': r'/api/v[0-9]',
+    'SCHEMA_PATH_PREFIX_TRIM': True,
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.IsAuthenticated'],
+    'SERVE_AUTHENTICATION': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'persistAuthorization': True,
+        'displayOperationId': True,
+        'displayRequestDuration': True,
+        'docExpansion': 'none',
+        'filter': True,
+        'showExtensions': True,
+        'showCommonExtensions': True,
+    },
+    'REDOC_UI_SETTINGS': {
+        'nativeScrollbars': True,
+        'theme': {
+            'colors': {
+                'primary': {
+                    'main': '#3b82f6'
+                }
+            }
+        }
+    },
+    'PREPROCESSING_HOOKS': [
+        'drf_spectacular.contrib.djangorestframework_camel_case.camelize_serializer_fields',
+    ],
+    'POSTPROCESSING_HOOKS': [
+        'drf_spectacular.hooks.postprocess_schema_enums',
+    ],
+    'ENUM_NAME_OVERRIDES': {
+        'ValidationErrorEnum': 'drf_spectacular.utils.ValidationErrorEnum.choices',
+    },
+    'EXTENSIONS_INFO': {
+        'x-logo': {
+            'url': '/static/logo.png',
+            'altText': 'aiMediaGateway Logo'
+        }
+    },
+    # Multi-tenant specific extensions
+    'SCHEMA_COERCE_PATH_PK_SUFFIX': True,
+    'SCHEMA_COERCE_METHOD_NAMES': {
+        'retrieve': 'get',
+        'destroy': 'delete',
+    },
+    'TAGS': [
+        {
+            'name': 'Authentication',
+            'description': 'Authentication and authorization endpoints including JWT token management'
+        },
+        {
+            'name': 'Tenants',
+            'description': 'Multi-tenant management endpoints for tenant administrators'
+        },
+        {
+            'name': 'Users',
+            'description': 'User profile management with role-based access control'
+        },
+        {
+            'name': 'Permissions',
+            'description': 'Permission management and role assignment endpoints'
+        },
+        {
+            'name': 'Call Sessions',
+            'description': 'Call session management and monitoring endpoints'
+        },
+        {
+            'name': 'Audio Recordings',
+            'description': 'Audio recording management and transcription endpoints'
+        },
+        {
+            'name': 'System Configuration',
+            'description': 'System configuration management endpoints'
+        },
+        {
+            'name': 'Real-time',
+            'description': 'WebSocket endpoints for real-time communication'
+        }
+    ],
+    'SECURITY': [
+        {
+            'type': 'http',
+            'scheme': 'bearer',
+            'bearerFormat': 'JWT',
+        },
+        {
+            'type': 'apiKey',
+            'in': 'header',
+            'name': 'X-Tenant-ID',
+            'description': 'Tenant identifier for multi-tenant access'
+        }
+    ],
+    'SERVERS': [
+        {
+            'url': 'http://localhost:8000',
+            'description': 'Development server'
+        },
+        {
+            'url': 'https://api.aimediagateway.com',
+            'description': 'Production server'
+        }
+    ]
 }
 
 # Database
@@ -266,3 +441,36 @@ RIVA_MAX_CONCURRENT_REQUESTS = config('RIVA_MAX_CONCURRENT_REQUESTS', default=10
 TRANSCRIPTION_CACHE_TTL = config('TRANSCRIPTION_CACHE_TTL', default=3600, cast=int)  # 1 hour
 TRANSCRIPTION_MAX_AUDIO_SIZE = config('TRANSCRIPTION_MAX_AUDIO_SIZE', default=50*1024*1024, cast=int)  # 50MB
 TRANSCRIPTION_SUPPORTED_FORMATS = ['wav', 'mp3', 'flac', 'ogg', 'aac']
+
+# WebSocket Authentication and Security Configuration
+# Rate limiting settings for WebSocket connections
+WEBSOCKET_RATE_LIMIT_WINDOW = config('WEBSOCKET_RATE_LIMIT_WINDOW', default=60, cast=int)  # 60 seconds
+WEBSOCKET_RATE_LIMIT_MAX = config('WEBSOCKET_RATE_LIMIT_MAX', default=10, cast=int)  # Max connections per window
+
+# Origin validation settings
+WEBSOCKET_ALLOW_ANY_ORIGIN = DEBUG  # Allow any origin in development mode
+WEBSOCKET_ALLOWED_ORIGINS = config('WEBSOCKET_ALLOWED_ORIGINS', default='', cast=lambda x: [i.strip() for i in x.split(',') if i.strip()])
+
+# If no specific origins configured, use these defaults
+if not WEBSOCKET_ALLOWED_ORIGINS and not WEBSOCKET_ALLOW_ANY_ORIGIN:
+    WEBSOCKET_ALLOWED_ORIGINS = [
+        'https://localhost:3000',  # React development server
+        'https://127.0.0.1:3000',
+        'https://localhost:8080',  # Alternative frontend port
+        'https://127.0.0.1:8080',
+        'https://pbx01.apntelecom.com',  # Production domain
+        'https://pbx01.apntelecom.com:8080',
+        '*.apntelecom.com',  # Wildcard for subdomains
+    ]
+
+# WebSocket connection limits per tenant
+WEBSOCKET_MAX_CONNECTIONS_PER_TENANT = config('WEBSOCKET_MAX_CONNECTIONS_PER_TENANT', default=100, cast=int)
+WEBSOCKET_MAX_CONNECTIONS_PER_USER = config('WEBSOCKET_MAX_CONNECTIONS_PER_USER', default=5, cast=int)
+
+# WebSocket authentication settings
+WEBSOCKET_AUTH_REQUIRED = config('WEBSOCKET_AUTH_REQUIRED', default=True, cast=bool)
+WEBSOCKET_TENANT_REQUIRED = config('WEBSOCKET_TENANT_REQUIRED', default=True, cast=bool)
+
+# WebSocket connection timeout settings
+WEBSOCKET_CONNECT_TIMEOUT = config('WEBSOCKET_CONNECT_TIMEOUT', default=30, cast=int)  # 30 seconds
+WEBSOCKET_DISCONNECT_TIMEOUT = config('WEBSOCKET_DISCONNECT_TIMEOUT', default=5, cast=int)  # 5 seconds
