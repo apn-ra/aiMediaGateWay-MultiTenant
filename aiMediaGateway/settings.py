@@ -25,7 +25,7 @@ SECRET_KEY = config('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
 
-ALLOWED_HOSTS = ['38.107.174.40', '38.107.174.40:8080']  #config('ALLOWED_HOSTS', default=[], cast=list)
+ALLOWED_HOSTS = ['38.107.174.40', '38.107.174.40:8080', 'pbx01.apntelecom.com']  #config('ALLOWED_HOSTS', default=[], cast=list)
 
 
 # Application definition
@@ -400,7 +400,7 @@ SESSION_COOKIE_SECURE = not DEBUG  # Use secure cookies in production
 # Cache Configuration (Redis-based)
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'BACKEND': 'django_redis.cache.RedisCache',
         'LOCATION': 'redis://127.0.0.1:6379/1',
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',

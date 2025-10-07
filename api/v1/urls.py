@@ -12,25 +12,14 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenBlacklistView,
 )
-
-# Import all ViewSets
-from core.viewsets import (
-    TenantViewSet,
-    UserProfileViewSet,
-    CallSessionViewSet,
-    AudioRecordingViewSet,
-    SystemConfigurationViewSet,
-)
+from rest.viewsets.call_session import CallSessionViewSet
 
 # Create the main API router
 router = DefaultRouter()
 
 # Register all ViewSets with appropriate URL patterns
-router.register(r'tenants', TenantViewSet)
-router.register(r'users', UserProfileViewSet)
-router.register(r'call-sessions', CallSessionViewSet)
-router.register(r'audio-recordings', AudioRecordingViewSet)
-router.register(r'configurations', SystemConfigurationViewSet)
+# router.register(r'call-sessions', CallSessionViewSet, basename='call-sessions')
+
 
 app_name = 'api_v1'
 

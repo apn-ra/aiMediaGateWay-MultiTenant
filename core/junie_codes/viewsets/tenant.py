@@ -16,8 +16,8 @@ from datetime import timedelta
 
 from core.models import Tenant, CallSession, UserProfile
 from core.serializers import TenantSerializer, TenantStatsSerializer
-from core.permissions import TenantAdminPermission, TenantResourcePermission
-from core.filters import TenantFilterSet
+from core.junie_codes.permissions import TenantAdminPermission
+from core.junie_codes.filters import TenantFilterSet
 
 
 class TenantViewSet(viewsets.ModelViewSet):

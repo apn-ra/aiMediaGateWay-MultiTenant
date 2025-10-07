@@ -10,18 +10,16 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Count
-from django.contrib.auth.models import User
+from django.db.models import Q
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiExample, OpenApiResponse
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
 
-from core.models import UserProfile, Tenant, CallSession
+from core.models import UserProfile, CallSession
 from core.serializers import UserProfileSerializer, UserPermissionSerializer
-from core.permissions import (
+from core.junie_codes.permissions import (
     TenantAdminPermission, 
-    TenantResourcePermission, 
-    MatrixBasedPermission,
+    TenantResourcePermission,
     get_user_effective_permissions,
     check_permission,
     get_allowed_fields,
@@ -116,7 +114,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     - Role-based access control
     - User statistics and activity tracking
     """
-    
+
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated, TenantResourcePermission]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]

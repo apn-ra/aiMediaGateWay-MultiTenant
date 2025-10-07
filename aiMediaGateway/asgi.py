@@ -11,7 +11,7 @@ import os
 import aiMediaGateway.routing
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
-from core.websocket_middleware import WebSocketAuthMiddlewareStack
+from core.junie_codes.websocket_middleware import WebSocketAuthMiddlewareStack
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'aiMediaGateway.settings')
 

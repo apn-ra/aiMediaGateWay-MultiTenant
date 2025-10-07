@@ -11,16 +11,15 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import HttpResponse, Http404
-from django.db.models import Q, Sum
+from django.db.models import Sum
 from django.utils import timezone
-from django.core.files.base import ContentFile
 import os
 import mimetypes
 
-from core.models import AudioRecording, CallSession, UserProfile
+from core.models import AudioRecording, UserProfile
 from core.serializers import AudioRecordingSerializer, AudioTranscriptionSerializer
-from core.permissions import TenantResourcePermission, CallOperatorPermission
-from core.filters import AudioRecordingFilterSet
+from core.junie_codes.permissions import TenantResourcePermission
+from core.junie_codes.filters import AudioRecordingFilterSet
 
 
 class AudioRecordingViewSet(viewsets.ModelViewSet):

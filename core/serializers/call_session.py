@@ -40,7 +40,7 @@ class CallSessionSerializer(serializers.ModelSerializer):
             'caller_id',
             'caller_name',
             'dialed_number',
-            'call_direction',
+            'direction',
             'channel_name',
             'uniqueid',
             'status',
@@ -339,7 +339,7 @@ class LiveCallStatusSerializer(serializers.Serializer):
     """
     
     session_id = serializers.CharField()
-    status = serializers.ChoiceField(choices=CallSession.STATUS_CHOICES)
+    status = serializers.ChoiceField(choices=CallSession.SESSION_STATUS_CHOICES)
     caller_id = serializers.CharField()
     dialed_number = serializers.CharField()
     duration_seconds = serializers.IntegerField(required=False, allow_null=True)

@@ -5,6 +5,8 @@
 import logging
 import asyncio
 
+from asgiref.sync import sync_to_async
+from rest_framework import serializers
 from core.models import Tenant
 from core.session.manager import SessionManager, get_session_manager
 from core.junie_codes.ami.ami_manager import AMIConnectionConfig, ConnectionStats
@@ -65,6 +67,14 @@ class AMIConnection:
         if event_type not in self._event_handlers:
             self._event_handlers[event_type] = []
         self._event_handlers[event_type].append(handler)
+
+    def test_connect(self):
+        try:
+            self.manager.connect(run_forever=False)
+            return True
+        except Exception as e:
+            logger.error(f"AMI connection test failed: {e}")
+            raise serializers.ValidationError(str(e))
 
     async def connect(self):
         async with self._lock:

@@ -1,7 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
-import uuid
 
 
 class Tenant(models.Model):
@@ -10,9 +9,10 @@ class Tenant(models.Model):
     """
 
     name = models.CharField(max_length=100, unique=True)
-    domain = models.CharField(max_length=255, unique=True, null=True, blank=True)
-    schema_name = models.CharField(max_length=63, unique=True)
-    host = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=100, blank=True, unique=True, null=True)
+    domain = models.CharField(max_length=255, unique=True, null=True)
+
+    host = models.CharField(max_length=255, unique=True)
     ami_port = models.IntegerField(default=5038)
     ami_username = models.CharField(max_length=50)
     ami_secret = models.CharField(max_length=255)
@@ -20,10 +20,12 @@ class Tenant(models.Model):
     ari_port = models.IntegerField(default=8088)
     ari_username = models.CharField(max_length=50)
     ari_password = models.CharField(max_length=255)
-    ari_app_name = models.CharField(max_length=50, default='live-transcription')
+    ari_app_name = models.CharField(max_length=100, default='live-transcription')
     rtp_port_range_start = models.IntegerField(default=10000)
     rtp_port_range_end = models.IntegerField(default=20000)
+
     is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -78,6 +80,8 @@ class CallSession(models.Model):
     call_start_time = models.DateTimeField(default=timezone.now)
     call_answer_time = models.DateTimeField(null=True, blank=True)
     call_end_time = models.DateTimeField(null=True, blank=True)
+    recording_enabled = models.BooleanField(default=False)
+    transcription_enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -129,6 +133,7 @@ class AudioRecording(models.Model):
     sample_rate = models.IntegerField(default=8000)
     channels = models.IntegerField(default=1)
     duration_seconds = models.FloatField(null=True, blank=True)
+    language = models.CharField(max_length=10, default='en-US')
     status = models.CharField(max_length=20, choices=RECORDING_STATUS_CHOICES, default='starting')
     recording_metadata = models.JSONField(default=dict, blank=True)
     recording_start_time = models.DateTimeField(default=timezone.now)

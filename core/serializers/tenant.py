@@ -4,10 +4,14 @@ Tenant serializers for aiMediaGateway
 This module contains serializers for the Tenant model with multi-tenant
 configuration management capabilities.
 """
+import time
+import logging
 
 from rest_framework import serializers
 from core.models import Tenant
+from core.ami.manager import AMIConnection, AMIConnectionConfig
 
+logger = logging.getLogger(__name__)
 
 class TenantSerializer(serializers.ModelSerializer):
     """
@@ -21,32 +25,24 @@ class TenantSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(read_only=True)
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)
-    
-    # Computed fields
-    user_count = serializers.SerializerMethodField()
-    session_count = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Tenant
         fields = [
             'id',
             'name',
             'slug',
-            'subdomain',
             'is_active',
-            'asterisk_host',
+            'host',
             'ami_port',
             'ami_username',
-            'ami_password',
+            'ami_secret',
             'ari_port',
             'ari_username', 
             'ari_password',
             'ari_app_name',
-            'configuration',
             'created_at',
             'updated_at',
-            'user_count',
-            'session_count',
         ]
         
         # Sensitive fields that should be write-only
@@ -55,19 +51,7 @@ class TenantSerializer(serializers.ModelSerializer):
             'ari_password': {'write_only': True},
             'slug': {'required': False},  # Auto-generated if not provided
         }
-    
-    def get_user_count(self, obj):
-        """
-        Get the number of active users in this tenant.
-        
-        Args:
-            obj: Tenant instance
-            
-        Returns:
-            int: Number of active users
-        """
-        return obj.userprofile_set.filter(user__is_active=True).count()
-    
+
     def get_session_count(self, obj):
         """
         Get the number of call sessions for this tenant.
@@ -79,43 +63,31 @@ class TenantSerializer(serializers.ModelSerializer):
             int: Number of call sessions
         """
         return obj.callsession_set.count()
-    
-    def validate_subdomain(self, value):
-        """
-        Validate that the subdomain is unique and follows naming conventions.
-        
-        Args:
-            value: The subdomain value to validate
-            
-        Returns:
-            str: The validated subdomain value
-            
-        Raises:
-            ValidationError: If subdomain is invalid
-        """
-        if value:
-            # Check if subdomain already exists (excluding current instance)
-            existing = Tenant.objects.filter(subdomain=value)
-            if self.instance:
-                existing = existing.exclude(id=self.instance.id)
-            
-            if existing.exists():
-                raise serializers.ValidationError("This subdomain is already in use.")
-            
-            # Validate subdomain format (alphanumeric and hyphens only)
-            import re
-            if not re.match(r'^[a-z0-9-]+$', value):
-                raise serializers.ValidationError(
-                    "Subdomain can only contain lowercase letters, numbers, and hyphens."
+
+    @staticmethod
+    def _validate_ami_credentials(host, port, username, secret):
+        try:
+            if host and username and secret:
+                config = AMIConnectionConfig(
+                    host=host,
+                    port=port or 5038,
+                    username=username,
+                    secret=secret,
+                    timeout=10.0,
+                    max_retries=1,
+                    retry_delay=1.0,
+                    ping_interval=5.0
                 )
-            
-            # Reserved subdomains
-            reserved = ['www', 'api', 'admin', 'mail', 'ftp', 'test', 'staging']
-            if value in reserved:
-                raise serializers.ValidationError(f"'{value}' is a reserved subdomain.")
-        
-        return value
-    
+
+                ami_test = AMIConnection(tenant_id=0, config=config)
+                ami_test.test_connect()
+                time.sleep(0.05)
+                ami_test.manager.close()
+                return True
+        except Exception as e:
+            logger.error(f"Error validating AMI credentials: {e}")
+            raise serializers.ValidationError("Error Validating AMI Credentials") from e
+
     def validate_slug(self, value):
         """
         Validate that the slug is unique and follows naming conventions.
@@ -139,40 +111,19 @@ class TenantSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("This slug is already in use.")
         
         return value
-    
-    def validate_configuration(self, value):
-        """
-        Validate tenant configuration JSON structure.
-        
-        Args:
-            value: The configuration dictionary to validate
-            
-        Returns:
-            dict: The validated configuration
-            
-        Raises:
-            ValidationError: If configuration is invalid
-        """
-        if value is not None:
-            # Ensure it's a dictionary
-            if not isinstance(value, dict):
-                raise serializers.ValidationError("Configuration must be a valid JSON object.")
-            
-            # Validate required configuration keys
-            required_keys = ['recording_enabled', 'transcription_enabled']
-            for key in required_keys:
-                if key not in value:
-                    raise serializers.ValidationError(f"Configuration missing required key: {key}")
-            
-            # Validate configuration values
-            if not isinstance(value.get('recording_enabled'), bool):
-                raise serializers.ValidationError("recording_enabled must be a boolean value.")
-            
-            if not isinstance(value.get('transcription_enabled'), bool):
-                raise serializers.ValidationError("transcription_enabled must be a boolean value.")
-        
-        return value
-    
+
+    def validate(self, attrs):
+        host = attrs.get('host')
+
+        ami_username = attrs.get('ami_username')
+        ami_secret = attrs.get('ami_secret')
+        ami_port = attrs.get('ami_port')
+
+        ari_username = attrs.get('ari_username')
+        ari_password = attrs.get('ari_password')
+        ari_port = attrs.get('ari_port')
+
+
     def create(self, validated_data):
         """
         Create a new tenant with auto-generated slug if not provided.

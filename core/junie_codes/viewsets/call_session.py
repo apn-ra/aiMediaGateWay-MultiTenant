@@ -10,12 +10,10 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Count
 from django.utils import timezone
 from django.http import HttpResponse
 from datetime import timedelta
 import csv
-import json
 import io
 
 from core.models import CallSession, UserProfile, AudioRecording
@@ -25,8 +23,8 @@ from core.serializers import (
     CallSessionCreateSerializer,
     LiveCallStatusSerializer
 )
-from core.permissions import TenantResourcePermission, CallOperatorPermission
-from core.filters import CallSessionFilterSet
+from core.junie_codes.permissions import TenantResourcePermission
+from core.junie_codes.filters import CallSessionFilterSet
 
 
 class CallSessionViewSet(viewsets.ModelViewSet):

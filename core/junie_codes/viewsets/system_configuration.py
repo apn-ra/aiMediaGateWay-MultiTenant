@@ -14,9 +14,9 @@ from django.db.models import Q
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
-from core.models import SystemConfiguration, Tenant
-from core.serializers import SystemConfigurationSerializer, TenantStatsSerializer
-from core.permissions import TenantAdminPermission, TenantResourcePermission
+from core.models import SystemConfiguration
+from core.serializers import SystemConfigurationSerializer
+from core.junie_codes.permissions import TenantAdminPermission, TenantResourcePermission
 
 
 class SystemConfigurationViewSet(viewsets.ModelViewSet):

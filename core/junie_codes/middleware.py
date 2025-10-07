@@ -50,7 +50,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
         
         try:
             # Method 1: Subdomain-based identification
-            tenant, tenant_identifier, identification_method = self._identify_by_subdomain(request)
+            # tenant, tenant_identifier, identification_method = self._identify_by_subdomain(request)
             
             # Method 2: Header-based identification (if subdomain failed)
             if not tenant:
@@ -176,7 +176,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
                     if tenant_id.isdigit():
                         tenant = Tenant.objects.get(id=int(tenant_id), is_active=True)
                     else:
-                        tenant = Tenant.objects.get(slug=tenant_id, is_active=True)
+                        tenant = Tenant.objects.get(name=tenant_id, is_active=True)
                     
                     cache.set(cache_key, tenant, 300)  # Cache for 5 minutes
                 except Tenant.DoesNotExist:
@@ -198,7 +198,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
             HttpResponse object with added headers
         """
         if hasattr(request, 'tenant') and request.tenant:
-            response['X-Tenant-Context'] = request.tenant.slug
+            response['X-Tenant-Context'] = request.tenant.name
             response['X-Tenant-Method'] = getattr(request, 'tenant_identification_method', 'unknown')
         
         return response

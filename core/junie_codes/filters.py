@@ -169,7 +169,7 @@ class CallSessionFilterSet(django_filters.FilterSet):
         model = CallSession
         fields = [
             'status',
-            'call_direction',
+            'direction',
             'recording_enabled',
             'transcription_enabled',
         ]
@@ -411,7 +411,7 @@ class AudioRecordingFilterSet(django_filters.FilterSet):
     
     class Meta:
         model = AudioRecording
-        fields = ['format', 'language']
+        fields = ['audio_format', 'language']
     
     def filter_has_transcription(self, queryset, name, value):
         """Filter recordings that have transcription"""
