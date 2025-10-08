@@ -41,7 +41,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
             return None
             
         # Skip tenant identification for admin and auth endpoints
-        if request.path.startswith('/admin/') or 'auth' in request.path:
+        if request.path.startswith('/admin/') or 'auth' or request.path.startswith('/user/') in request.path:
             return None
             
         tenant = None

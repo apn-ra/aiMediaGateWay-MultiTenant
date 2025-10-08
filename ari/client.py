@@ -40,10 +40,7 @@ class ARIClient:
 
     Attributes:
         config: Configuration object with connection settings
-        session: aiohttp ClientSession for HTTP requests
-        websocket: Active WebSocket connection (if connected)
-        is_connected: Whether the client is currently connected
-        available_endpoints: Dictionary of discovered ARI endpoints
+
 
     Example:
         ```python

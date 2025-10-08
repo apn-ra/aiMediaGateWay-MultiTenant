@@ -13,5 +13,15 @@ class TenantViewSet(viewsets.ModelViewSet):
     serializer_class = TenantSerializer
     permission_classes = [IsAuthenticated, DjangoModelPermissions]
 
+    def get_queryset(self):
+        user = self.request.user
+
+        queryset = super().get_queryset()
+        # if user.groups.filter(name='clients').exists():
+        #     return Tenant.objects.filter(id=user.tenant_id)
+        return queryset.none()
+
     def perform_create(self, serializer):
         serializer.save()
+
+

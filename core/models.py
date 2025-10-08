@@ -36,6 +36,9 @@ class Tenant(models.Model):
     def __str__(self):
         return self.name
 
+class CallSessionManager(models.Manager):
+    def get_active_sessions(self):
+        return self.filter(status__in=['detected', 'answered', 'bridged', 'recording'])
 
 class CallSession(models.Model):
     """
@@ -61,13 +64,11 @@ class CallSession(models.Model):
     ]
 
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='call_sessions')
-    asterisk_channel_id = models.CharField(max_length=255, unique=True)
-    asterisk_unique_id = models.CharField(max_length=255, unique=True)
     caller_id_name = models.CharField(max_length=100, null=True, blank=True)
     caller_id_number = models.CharField(max_length=50, null=True, blank=True)
     dialed_number = models.CharField(max_length=50, null=True, blank=True)
     call_type = models.CharField(max_length=10, choices=CALL_TYPE, default='caller')
-    channel_id = models.CharField(max_length=255, null=True, blank=True)
+    channel_id = models.CharField(max_length=255, null=True, unique=True, blank=True)
     channel_name = models.CharField(max_length=255, null=True, blank=True)
     direction = models.CharField(max_length=10, choices=CALL_DIRECTION_CHOICES)
     status = models.CharField(max_length=20, choices=SESSION_STATUS_CHOICES, default='detected')
@@ -80,18 +81,16 @@ class CallSession(models.Model):
     call_start_time = models.DateTimeField(default=timezone.now)
     call_answer_time = models.DateTimeField(null=True, blank=True)
     call_end_time = models.DateTimeField(null=True, blank=True)
-    recording_enabled = models.BooleanField(default=False)
-    transcription_enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    objects = CallSessionManager()
 
     class Meta:
         db_table = 'call_sessions'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['tenant', 'status']),
-            models.Index(fields=['asterisk_channel_id']),
-            models.Index(fields=['asterisk_unique_id']),
+            models.Index(fields=['channel_id']),
         ]
 
     def __str__(self):
@@ -103,6 +102,16 @@ class CallSession(models.Model):
             return (self.call_end_time - self.call_answer_time).total_seconds()
         return None
 
+class Transcript(models.Model):
+    call_session = models.OneToOneField(CallSession, on_delete=models.CASCADE, related_name='transcript')
+    provider_id = models.CharField(max_length=100, blank=True)
+    provider = models.CharField(max_length=100, default='riva')
+    language_detected = models.CharField(max_length=10, default='en-US')
+    text = models.TextField(blank=True)
+    confidence = models.FloatField(default=0.0)
+    speaker_id = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
 class AudioRecording(models.Model):
     """
@@ -168,6 +177,7 @@ class UserProfile(models.Model):
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='user_profiles', null=True, blank=True)
+    account_id = models.CharField(max_length=255, null=True, blank=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='viewer')
     phone_extension = models.CharField(max_length=20, null=True, blank=True)
     department = models.CharField(max_length=100, null=True, blank=True)

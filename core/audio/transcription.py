@@ -31,7 +31,7 @@ class WordInfo:
 @dataclass
 class TranscriptionSegment:
     """Individual transcription segment/word"""
-    transcript_id: Optional[str] = None
+    provider_id: Optional[str] = None
     session_id: Optional[str] = None
     text: Optional[str] = None
     provider: Optional[TranscriptionProvider] = None
@@ -256,7 +256,7 @@ class AudioTranscriptionManager:
                 audio_chunks=audio_generator(), streaming_config=self.streaming_config):
 
             transcript = TranscriptionSegment(
-                transcript_id=resp.id,
+                provider_id=resp.id,
                 session_id=self.session_id
             )
 

@@ -4,13 +4,14 @@
 import asyncio
 import logging
 
-from typing import Dict, Any
-from django.utils import timezone
+from core.ami.events import AMIEventOrganizer
+from core.ari.events import ARIEventOrganizer
+
 from core.ami.manager import get_ami_manager
 from core.ari.manager import get_ari_manager
+
 from core.rtp_integration import get_rtp_integrator
-from core.session.manager import get_session_manager, CallSessionData
-from decouple import config
+from core.session.manager import get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ class AsteriskEventHandlers:
     :type ari_manager: Optional[Any]
     """
     def __init__(self, tenant_id:int):
+        self.ari_events = None
+        self.ami_events = None
         self.rtp_integrator = None
         self.tenant_id = tenant_id
         self._ari_task = None
@@ -48,6 +51,9 @@ class AsteriskEventHandlers:
         self.session_manager = get_session_manager()
         self.ami_manager = await get_ami_manager()
         self.ari_manager = get_ari_manager()
+
+        self.ami_events = AMIEventOrganizer(self)
+        self.ari_events = ARIEventOrganizer(self)
 
         await asyncio.sleep(0.01)
         await self.register_ari_handlers()
@@ -76,11 +82,11 @@ class AsteriskEventHandlers:
     async def register_ari_handlers(self):
         """Register all ari event handlers for a specific tenant."""
         await self.ari_manager.register_event_handler(
-            self.tenant_id, 'StasisStart', self.handle_StasisStart
+            self.tenant_id, 'StasisStart', self.ari_events.handle_stasis_start
         )
 
         await self.ari_manager.register_event_handler(
-            self.tenant_id, 'StasisEnd', self.handle_StasisEnd
+            self.tenant_id, 'StasisEnd', self.ari_events.handle_stasis_end
         )
 
     async def register_ami_handlers(self):
@@ -88,116 +94,13 @@ class AsteriskEventHandlers:
 
         # Register event handlers with the AMI manager
         await self.ami_manager.register_event_handler(
-            self.tenant_id, 'BridgeEnter', self.handle_ami_bridge_enter
+            self.tenant_id, 'Newchannel', self.ami_events.handle_new_channel
         )
 
         await self.ami_manager.register_event_handler(
-            self.tenant_id, 'Hangup', self.handle_ami_hangup
+            self.tenant_id, 'BridgeEnter', self.ami_events.handle_bridge_enter
         )
 
-    async def handle_StasisStart(self, event_data):
-        """Handle StasisStart events."""
-        channel = event_data['channel']
-        channel_id = channel['id']
-
-        if len(event_data['args']) == 2 and event_data['args'][0] == 'session_id':
-           success = await self.rtp_integrator.integrate_session(session_id=event_data['args'][1])
-           if success:
-               # Get updated session data
-               session = await self.session_manager.get_session(event_data['args'][1])
-
-               client = self.ari_manager.connections[self.tenant_id].client
-               externalHost = f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}"
-
-               # Create external media channel and bridge
-               em_channel = await client.create_external_media(
-                   external_host=externalHost,
-                   codec='ulaw'
-               )
-
-               bridge = await client.create_bridge(bridge_type='mixing')
-               await bridge.add_channel(em_channel.id)
-               await bridge.add_channel(channel_id)
-
-               # Update session data
-               await self.session_manager.update_session(session.session_id, {
-                       'snoop_channel_id': channel_id,
-                       'external_media_channel_id': em_channel.id
-               })
-
-    async def handle_StasisEnd(self, event_data):
-        """Handle StasisEnd events."""
-        channel = event_data['channel']
-        channel_id = channel['id']
-
-    async def handle_ami_bridge_enter(self, manager, message: Dict[str, Any]):
-        """Handle Bridge enter events."""
-        if self.session_manager.is_inbound_channel(message.get('channel')):
-            session_data = await self._create_call_session(message)
-
-            session_id = await self.session_manager.create_session(session_data=session_data)
-            client = self.ari_manager.connections[self.tenant_id].client
-
-            if session_data.channel.dialplan.exten != '':
-                await client.snoop_channel(
-                    channel_id=session_data.channel.id,
-                    spy='both',
-                    appArgs=f"session_id,{session_id}"
-                )
-
-    async def handle_ami_hangup(self, manager, message: Dict[str, Any]):
-        """
-        Handle Hangup events for session cleanup.
-
-        This cleans up sessions when calls end.
-        """
-        uniqueid = message.get('Uniqueid', '')
-
-        if self.session_manager.is_inbound_channel(message.get('channel')):
-            # Get an existing session
-            session = await self.session_manager.get_session(uniqueid)
-            if session:
-                if session.channel.dialplan.exten != '':
-                    await self.rtp_integrator.de_integrate_session(session_id=session.session_id)
-                    try:
-                        await self.ari_manager.connections[self.tenant_id].client.hangup_channel(
-                            channel_id=session.external_media_channel_id,
-                            reason='normal'
-                        )
-                    except Exception as e:
-                        logger.error(f"Error in Hangup on externalMedia : {e}")
-
-                metadata = session.metadata
-                metadata['hangup_code'] = message.get('Cause')
-                metadata['hangup_cause'] = message.get('Cause-txt', '')
-                updates = {
-                    'status': 'completed',
-                    'call_end_time': timezone.now(),
-                    'metadata': metadata,
-                }
-                await self.session_manager.update_session(uniqueid, updates)
-
-                # Schedule session cleanup after a delay
-                asyncio.create_task(self._delayed_session_cleanup(uniqueid, delay=300))  # 5 minutes
-            else:
-                logger.warning(f"No session found for hangup event uniqueid: {uniqueid}")
-
-    async def _delayed_session_cleanup(self, session_id: str, delay: int = 300):
-        """Cleanup session after a delay."""
-        try:
-            await asyncio.sleep(delay)
-            await self.session_manager.cleanup_session(session_id)
-            logger.info(f"Cleaned up session {session_id} after {delay} seconds")
-        except Exception as e:
-            logger.error(f"Error in delayed cleanup for session {session_id}: {e}")
-
-    async def _create_call_session(self, message: Dict[str, Any]) -> CallSessionData:
-        """Create call session."""
-        session_data = await self.session_manager.convert_to_call_session_data(
-            tenant_id=self.tenant_id,
-            message=message
+        await self.ami_manager.register_event_handler(
+            self.tenant_id, 'Hangup', self.ami_events.handle_hangup
         )
-
-        session_data.rtp_endpoint_host = config('AI_MEDIA_GATEWAY_HOST')
-        session_data.asterisk_host = self.ami_manager.connections[self.tenant_id].config.host
-        return session_data

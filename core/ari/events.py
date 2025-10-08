@@ -4,20 +4,13 @@
 import logging
 import asyncio
 
+from django.utils import timezone
+
 logger = logging.getLogger(__name__)
 
-from core.session.manager import get_session_manager
-from core.ari.manager import get_ari_manager, ARIConnection
-
-class ARIEventHandler:
-
-    def __init__(self, tenant_id:int):
-        self.rtp_integrator = None
-        self.tenant_id = tenant_id
-        self.session_manager = None
-        self.ari_manager = None
-        self._tenant_cache = {}
-        self.bridges = {}
+class ARIEventOrganizer:
+    def __init__(self, main: "AsteriskEventHandlers"):
+        self.main = main
         self._event_statistics = {
             'new_channel': 0,
             'dial': 0,
@@ -27,56 +20,39 @@ class ARIEventHandler:
             'total': 0
         }
 
-    async def initialize(self):
-        """Initialize the event handler with managers."""
-        self.session_manager = get_session_manager()
-        self.ari_manager = get_ari_manager()
-
-    async def register_handlers(self, tenant_id: int) -> ARIConnection:
-        """Register all event handlers for a specific tenant."""
-        await self.initialize(tenant_id)
-
-        await self.ari_manager.register_event_handler(
-            tenant_id, 'StasisStart', self.handle_StasisStart
-        )
-
-        await self.ari_manager.register_event_handler(
-            tenant_id, 'StasisEnd', self.handle_StasisEnd
-        )
-
-        return self.ari_manager.connections[tenant_id]
-
-    async def handle_dial(self, event_data):
-        """Handle dial events."""
-        self._event_statistics['dial'] += 1
-        logger.info(f"Dialing Event Data: {event_data}")
-
-    async def handle_channel_state_change(self, event_data):
-        """Handle channel state change events."""
-        channel = event_data['channel']
-        channel_id = channel['id']
-        channel_state = channel['state']
-
-    async def handle_StasisStart(self, event_data):
+    async def handle_stasis_start(self, event_data):
         """Handle StasisStart events."""
         channel = event_data['channel']
         channel_id = channel['id']
-        logger.info(f"Received StasisStart: {event_data}")
 
         if len(event_data['args']) == 2 and event_data['args'][0] == 'session_id':
-           session = await self.session_manager.get_session(event_data['args'][1])
-           logger.info(f"Session: {session}")
+           success = await self.main.rtp_integrator.integrate_session(session_id=event_data['args'][1])
+           if success:
+               # Get updated session data
+               session = await self.main.session_manager.get_session(event_data['args'][1])
 
-    async def handle_StasisEnd(self, event_data):
+               client = self.main.ari_manager.connections[self.main.tenant_id].client
+               externalHost = f"{session.rtp_endpoint_host}:{session.rtp_endpoint_port}"
+
+               # Create external media channel and bridge
+               em_channel = await client.create_external_media(
+                   external_host=externalHost,
+                   codec='ulaw'
+               )
+
+               bridge = await client.create_bridge(bridge_type='mixing')
+               await bridge.add_channel(em_channel.id)
+               await bridge.add_channel(channel_id)
+
+               # Update session data
+               await self.main.session_manager.update_session(session.session_id, {
+                       'call_answer_time': timezone.now(),
+                       'status': 'bridged',
+                       'snoop_channel_id': channel_id,
+                       'external_media_channel_id': em_channel.id
+               })
+
+    async def handle_stasis_end(self, event_data):
         """Handle StasisEnd events."""
         channel = event_data['channel']
         channel_id = channel['id']
-
-    async def _delayed_session_cleanup(self, session_id: str, delay: int = 300):
-        """Clean up session after a delay."""
-        try:
-            await asyncio.sleep(delay)
-            await self.session_manager.cleanup_session(session_id)
-            logger.info(f"Cleaned up session {session_id} after {delay} seconds")
-        except Exception as e:
-            logger.error(f"Error in delayed cleanup for session {session_id}: {e}")

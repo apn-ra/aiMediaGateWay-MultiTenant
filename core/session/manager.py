@@ -156,7 +156,7 @@ class SessionManager:
             direction='inbound' if call_type == 'callee' else 'outbound',
             call_type=call_type,
             ari_control= False,
-            status='bridged',
+            status='detected',
             channel= ChannelData(
                 id=unique,
                 name=message.get('Channel'),
@@ -177,8 +177,7 @@ class SessionManager:
                     priority=message.get('Priority'),
                 )
             ),
-            call_start_time=timezone.now(),
-            call_answer_time=timezone.now(),
+            call_start_time=timezone.now()
         )
     def create_session_from_ari_event(self, tenant_id:int , event_data: Dict[str, Any]) -> Optional[CallSessionData]:
         data = None
@@ -226,6 +225,12 @@ class SessionManager:
         # Default to Outbound for unknown channels
         return False
 
+    async def get_or_create__session(self, session_data: CallSessionData, store_database: bool = True):
+        session = await self.get_session(session_data.session_id)
+        if not session:
+            session = await self.create_session(session_data, store_database)
+        return session
+
     async def create_session(self, session_data: CallSessionData, store_database: bool = True) -> str:
         """
         Create new call session with early detection from AMI events
@@ -270,8 +275,6 @@ class SessionManager:
             await asyncio.to_thread(
                 lambda: CallSession.objects.create(
                     tenant_id=session_data.tenant_id,
-                    asterisk_channel_id=session_data.channel.id,
-                    asterisk_unique_id=session_data.channel.protocol_id,
                     channel_name=session_data.channel.name,
                     channel_id=session_data.channel.id,
                     caller_id_name=session_data.channel.caller.number or '',
@@ -307,7 +310,7 @@ class SessionManager:
             # logger.info(f"Updating session {sessionId} with updates: {safe_updates}")
             await asyncio.to_thread(
                 lambda: CallSession.objects.filter(
-                    asterisk_unique_id=sessionId
+                    channel_id=sessionId
                 ).update(**safe_updates)
             )
         except Exception as e:

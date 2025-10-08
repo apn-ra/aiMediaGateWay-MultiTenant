@@ -13,13 +13,16 @@ from rest_framework_simplejwt.views import (
     TokenBlacklistView,
 )
 from rest.viewsets.call_session import CallSessionViewSet
+from rest.viewsets.tenant import TenantViewSet
+from rest.viewsets.user import UserViewSet
 
 # Create the main API router
 router = DefaultRouter()
 
 # Register all ViewSets with appropriate URL patterns
 # router.register(r'call-sessions', CallSessionViewSet, basename='call-sessions')
-
+router.register(r'tenants', TenantViewSet, basename='tenants')
+router.register(r'users', UserViewSet, basename='users')
 
 app_name = 'api_v1'
 
