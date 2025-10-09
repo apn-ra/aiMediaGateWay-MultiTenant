@@ -7,7 +7,7 @@ import asyncio
 
 from asgiref.sync import sync_to_async
 from rest_framework import serializers
-from core.models import Tenant
+from core.models import Tenant, TenantLog
 from core.session.manager import SessionManager, get_session_manager
 from core.junie_codes.ami.ami_manager import AMIConnectionConfig, ConnectionStats
 from typing import Dict, List, Optional, Any, Callable
@@ -43,6 +43,17 @@ class AMIConnection:
             timeout=self.config.timeout
         )
 
+    async def update_tenant_status(self, active: bool):
+        await sync_to_async(Tenant.objects.filter(id=self.tenant_id).update)(is_active=active)
+
+    async def create_tenant_log(self, level: str, message: str):
+        await asyncio.to_thread(
+            lambda: TenantLog.objects.create(
+                tenant_id=self.tenant_id,
+                level=level,
+                message=message,
+            )
+        )
     async def _setup_event_handlers(self):
         """Setup internal event handlers for connection monitoring."""
 
@@ -67,14 +78,6 @@ class AMIConnection:
         if event_type not in self._event_handlers:
             self._event_handlers[event_type] = []
         self._event_handlers[event_type].append(handler)
-
-    def test_connect(self):
-        try:
-            self.manager.connect(run_forever=False)
-            return True
-        except Exception as e:
-            logger.error(f"AMI connection test failed: {e}")
-            raise serializers.ValidationError(str(e))
 
     async def connect(self):
         async with self._lock:
@@ -105,6 +108,7 @@ class AMIConnection:
                 self.stats.last_error = error_msg
                 self.stats.is_healthy = False
 
+                await self.create_tenant_log("critical", error_msg)
                 # Schedule reconnection
                 await self._schedule_reconnect()
                 return False
@@ -140,6 +144,7 @@ class AMIConnection:
             return response
         except Exception as e:
             logger.error(f"AMI command failed for tenant {self.tenant_id}: {e}")
+            await self.create_tenant_log("error", f"AMI command failed: {str(e)}")
             self.stats.last_error = str(e)
             await self._schedule_reconnect()
             return None
@@ -175,6 +180,7 @@ class AMIConnection:
                 break
             except Exception as e:
                 logger.error(f"AMI ping error for tenant {self.tenant_id}: {e}")
+                await self.create_tenant_log("error", f"AMI ping error: {str(e)}")
                 await self._schedule_reconnect()
                 break
 
@@ -210,10 +216,12 @@ class AMIConnection:
                 break
             except Exception as e:
                 logger.error(f"AMI reconnection error for tenant {self.tenant_id}: {e}")
+                await self.create_tenant_log("error", f"AMI reconnection error: {str(e)}")
                 retry_count += 1
 
         logger.error(f"AMI reconnection failed after {self.config.max_retries} attempts for tenant {self.tenant_id}")
-
+        await self.create_tenant_log("critical", f"AMI reconnection failed after {self.config.max_retries} attempts")
+        await self.update_tenant_status(False)
 
 class AMIManager:
     """Multi-tenant AMI connection manager with connection pooling."""

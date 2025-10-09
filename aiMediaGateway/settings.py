@@ -59,6 +59,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     # Multi-tenant middleware for API isolation
+    'core.middleware.CombinedAuthMiddleware',
     'core.middleware.TenantAPIMiddleware',
 ]
 
@@ -93,9 +94,9 @@ CHANNEL_LAYERS = {
 # Django REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
         'core.authentication.TenantAPIKeyAuthentication',
         'core.authentication.SignedRequestAuthentication',
     ],
@@ -119,7 +120,7 @@ REST_FRAMEWORK = {
 # JWT Configuration
 from datetime import timedelta
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=12),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
@@ -135,9 +136,8 @@ SIMPLE_JWT = {
 
 # CORS Configuration
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",
+    "http://38.107.174.40:8080",
+    "http://pbx01.apntelecom.com:8080",
     "http://127.0.0.1:8080",
 ]
 

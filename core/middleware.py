@@ -5,14 +5,21 @@ This module provides middleware for identifying and isolating tenants
 in API requests using multiple identification strategies.
 """
 
+import jwt
 import logging
+from django.conf import settings
 from django.http import JsonResponse
+from django.contrib.auth import get_user_model
 from django.utils.deprecation import MiddlewareMixin
 from django.core.cache import cache
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import TokenError
+
 from core.models import Tenant
 
 logger = logging.getLogger(__name__)
 
+User = get_user_model()
 
 class TenantAPIMiddleware(MiddlewareMixin):
     """
@@ -41,7 +48,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
             return None
             
         # Skip tenant identification for admin and auth endpoints
-        if request.path.startswith('/admin/') or 'auth' or request.path.startswith('/user/') in request.path:
+        if request.path.startswith('/admin/') or 'auth' in request.path:
             return None
             
         tenant = None
@@ -49,10 +56,9 @@ class TenantAPIMiddleware(MiddlewareMixin):
         identification_method = None
         
         try:
-            # Method 1: Subdomain-based identification
-            # tenant, tenant_identifier, identification_method = self._identify_by_subdomain(request)
-            
-            # Method 2: Header-based identification (if subdomain failed)
+            if request.user.is_superuser or request.user.is_staff:
+                return None
+
             if not tenant:
                 tenant, tenant_identifier, identification_method = self._identify_by_header(request)
             
@@ -65,7 +71,7 @@ class TenantAPIMiddleware(MiddlewareMixin):
                 logger.warning(f"No tenant identified for API request: {request.path}")
                 return JsonResponse({
                     'error': 'Tenant identification required',
-                    'detail': 'API requests must include tenant identification via subdomain, X-Tenant-ID header, or tenant URL parameter'
+                    'detail': 'API requests must include tenant identification via X-Tenant-ID header, or tenant URL parameter'
                 }, status=400)
             
             # Set tenant context in request
@@ -202,3 +208,37 @@ class TenantAPIMiddleware(MiddlewareMixin):
             response['X-Tenant-Method'] = getattr(request, 'tenant_identification_method', 'unknown')
         
         return response
+
+
+class CombinedAuthMiddleware:
+    """
+    Non-blocking middleware that supports Django session auth + SimpleJWT access tokens.
+    Important: does NOT return 401 on invalid/missing tokens — let views handle that.
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.jwt_auth = JWTAuthentication()
+
+    def __call__(self, request):
+        # If AuthenticationMiddleware already set request.user (session or other), keep it
+        if hasattr(request, "user") and request.user.is_authenticated:
+            return self.get_response(request)
+
+        # Try to load an access token from Authorization header if present
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(' ', 1)[1].strip()
+            try:
+                validated_token = self.jwt_auth.get_validated_token(token)
+                user = self.jwt_auth.get_user(validated_token)
+                # Attach user and validated token so downstream code can use request.auth
+                request.user = user
+                request.auth = validated_token
+                request.auth_type = 'jwt'
+            except TokenError:
+                # Token invalid/expired: do NOT block — let refresh endpoint handle refresh
+                request.auth_type = 'jwt_invalid'
+                # Optionally set a flag so views know token was present but invalid:
+                # request._jwt_error = str(e)
+
+        return self.get_response(request)

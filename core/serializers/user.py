@@ -7,19 +7,32 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from core.models import Tenant, UserProfile
 
-class UserSerializer(serializers.ModelSerializer):
+class TenantSerializer(serializers.ModelSerializer):
     class Meta:
-        model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name']
+        model = Tenant
+        fields = ['id', 'name']
         read_only_fields = ['id']
 
+class UserProfileSerializer(serializers.ModelSerializer):
+    tenant = TenantSerializer(read_only=True)
+    class Meta:
+        model = UserProfile
+        fields = ['id', 'role', 'account_id', 'tenant']
+        read_only_fields = ['id']
 
+class UserSerializer(serializers.ModelSerializer):
+    group = UserProfileSerializer(source='profile', read_only=True)
 
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'group']
+        read_only_fields = ['id']
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True)
     tenant_id = serializers.IntegerField(write_only=True)
+    group = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
@@ -32,6 +45,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             'password',
             'confirm_password',
             'tenant_id',
+            'group'
         ]
         extra_kwargs = {
             'password': {'write_only': True}
@@ -49,9 +63,16 @@ class UserCreateSerializer(serializers.ModelSerializer):
             last_name=validated_data.get('last_name', '')
         )
 
+        if validated_data.get('group') == 'operator' or validated_data.get('group') == 'admin':
+            user.is_staff = True
+        user.save()
+
         user.profile.tenant_id = validated_data['tenant_id']
+        user.profile.role = validated_data['group']
         user.profile.save()
+
         validated_data.pop('tenant_id')
+        validated_data.pop('group')
         return user
 
     @staticmethod
@@ -67,5 +88,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
         if not self._validate_tenant(int(attrs['tenant_id'])):
             raise serializers.ValidationError({"tenant_id": "Tenant does not exist."})
+
+        if not attrs['group'] in dict(UserProfile.ROLE_CHOICES).keys():
+            raise serializers.ValidationError({"group": f"Invalid role: {attrs['group']}."})
 
         return attrs

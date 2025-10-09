@@ -1,11 +1,15 @@
 # Author: RA
 # Purpose: Asterisk REST Interface Client Manager
 # Created: 24/09/2025
+
 import asyncio
 import logging
 from datetime import timedelta
 from typing import Callable, Dict, List, Optional
-from core.models import Tenant
+
+from asgiref.sync import sync_to_async
+
+from core.models import Tenant, TenantLog
 from ari import ARIConfig, ARIClient, CircuitBreaker
 from ari.exceptions import ConnectionError
 from core.session.manager import get_session_manager, SessionManager
@@ -54,6 +58,18 @@ class ARIConnection:
 
         logger.info(f"ARI connection initialized for tenant {tenant_id}")
 
+    async def update_tenant_status(self, active: bool):
+        await sync_to_async(Tenant.objects.filter(id=self.tenant_id).update)(is_active=active)
+
+    async def create_tenant_log(self, level: str, message: str):
+        await asyncio.to_thread(
+            lambda: TenantLog.objects.create(
+                tenant_id=self.tenant_id,
+                level=level,
+                message=message,
+            )
+        )
+
     async def connect(self):
         async with self._lock:
             if self.stats.connected:
@@ -78,13 +94,16 @@ class ARIConnection:
                     retry_count += 1
                     self.stats.failed_operations += 1
                     logger.error(f"ARI connection failed for tenant {self.tenant_id}: {e}")
+                    await self.create_tenant_log("critical", f"ARI connection failed: {str(e)}")
 
                     if retry_count < self.config.retry_attempts:
                         logger.info(f"Retrying in {self.config.retry_delay} seconds...")
                         await asyncio.sleep(self.config.retry_delay)
                     else:
                         logger.error(f"Max retries reached for tenant {self.tenant_id}")
+                        await self.create_tenant_log("critical", "Max retries reached")
                         await self._schedule_reconnect()
+                        await self.update_tenant_status(False)
                         return False
             return False
 
@@ -114,6 +133,7 @@ class ARIConnection:
 
             except Exception as e:
                 logger.error(f"Error disconnecting ARI for tenant {self.tenant_id}: {e}")
+                await self.create_tenant_log("error", f"ARI disconnect error: {str(e)}")
 
     async def _schedule_reconnect(self):
         """Schedule automatic reconnection"""
@@ -140,6 +160,7 @@ class ARIConnection:
                 break
             except Exception as e:
                 logger.error(f"Reconnection error for tenant {self.tenant_id}: {e}")
+                await self.create_tenant_log("critical", f"Reconnection error: {str(e)}")
                 await asyncio.sleep(self.config.retry_delay)
 
     def register_event_handler(self, event_type: str, handler: Callable):

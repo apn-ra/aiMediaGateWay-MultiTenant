@@ -34,6 +34,7 @@ class TenantSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'name',
+            'domain',
             'slug',
             'is_active',
             'host',
@@ -50,7 +51,8 @@ class TenantSerializer(serializers.ModelSerializer):
         
         # Sensitive fields that should be write-only
         extra_kwargs = {
-            'ami_password': {'write_only': True},
+            'domain': {'required': True},
+            'ami_secret': {'write_only': True},
             'ari_password': {'write_only': True},
             'slug': {'required': False},  # Auto-generated if not provided
         }
@@ -78,7 +80,7 @@ class TenantSerializer(serializers.ModelSerializer):
 
             if response.status_code == 200:
                 info = response.json()
-                version_str = info.get("build", {}).get("version", "")
+                version_str = info.get("system", {}).get("version", "")
                 logger.debug(f"ARI Received version: {version_str}")
 
                 match = re.match(r"(\d+)\.(\d+)", version_str)
@@ -88,22 +90,25 @@ class TenantSerializer(serializers.ModelSerializer):
                     if major >= min_version:
                         return True
                     else:
-                        raise serializers.ValidationError(f"Asterisk version {major}.{minor} is too old. Minimum required version: {min_version}")
+                        raise Exception(f"Asterisk version {major}.{minor} is too old. Asterisk Minimum required version: {min_version}")
                 else:
-                    raise serializers.ValidationError("Could not detect Asterisk version from response.")
+                    raise Exception("Could not detect Asterisk version from response.")
 
             elif response.status_code == 401:
-                raise serializers.ValidationError("Authentication Failed")
+                raise Exception("Authentication Failed")
             else:
-                raise serializers.ValidationError(f"Unexpected response {response.status_code}: {response.text}")
+                raise Exception(f"Unexpected response {response.status_code}: {response.text}")
 
         except requests.exceptions.ConnectionError:
-            raise serializers.ValidationError("Connection failed — ARI may not be running or port is wrong.")
+            raise Exception("Connection failed — ARI may not be running or port is wrong.")
         except Exception as e:
-            raise serializers.ValidationError(f"Error: Validating ARI Credentials") from e
+            raise serializers.ValidationError({
+                "host": f"{host}",
+                "error": str(e),
+            }) from e
 
     @staticmethod
-    def _validate_ami_credentials(host:str, username:str, secret:str, port:int=5038, min_version:int = 18, timeout:int = 3) -> Optional[bool]:
+    def _validate_ami_credentials(host:str, username:str, secret:str, port:int=5038, min_version:int = 11, timeout:int = 3) -> Optional[bool]:
         """Validate Asterisk AMI credentials by attempting to log in."""
         try:
             # Connect to AMI socket
@@ -123,7 +128,7 @@ class TenantSerializer(serializers.ModelSerializer):
             minor = int(match.group(2))
             if major < min_version:
                 s.close()
-                raise serializers.ValidationError(f"Asterisk version {major}.{minor} is too old. Minimum required version: {min_version}")
+                raise Exception(f"Asterisk version {major}.{minor} is too old. Asterisk Call Manager Minimum required version: {min_version}")
 
             # Login action
             login_action = f"Action: Login\r\nUsername: {username}\r\nSecret: {secret}\r\nEvents: off\r\n\r\n"
@@ -137,14 +142,28 @@ class TenantSerializer(serializers.ModelSerializer):
             if "Message: Authentication accepted" in response:
                 return True
             elif "Message: Authentication failed" in response:
-                raise serializers.ValidationError("Authentication Failed")
+                raise Exception("Authentication Failed")
             else:
-                raise serializers.ValidationError("Validating AMI Credentials")
+                raise Exception("Validating AMI Credentials")
 
         except (socket.timeout, ConnectionRefusedError) as e:
-            raise serializers.ValidationError(f"Connecting to {host} Asterisk AMI") from e
+            raise Exception(str(e))
         except Exception as e:
-            raise serializers.ValidationError(f"Validating AMI Credentials") from e
+            raise serializers.ValidationError({"host": f"{host}", "error": str(e)}) from e
+
+    def validate_domain(self, value):
+        # Basic domain regex (no scheme like http://)
+        domain_pattern = re.compile(
+            r'^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$'
+        )
+        if not domain_pattern.match(value):
+            raise serializers.ValidationError("Invalid domain format.")
+
+        # Optional: ensure it's not an IP or malformed URL
+        if ' ' in value or '/' in value:
+            raise serializers.ValidationError("Domain must not contain spaces or slashes.")
+
+        return value
 
     def validate_slug(self, value):
         """
@@ -175,14 +194,24 @@ class TenantSerializer(serializers.ModelSerializer):
 
         ami_username = attrs.get('ami_username')
         ami_secret = attrs.get('ami_secret')
-        ami_port = attrs.get('ami_port')
+        ami_port = attrs.get('ami_port') or 5038
 
         ari_username = attrs.get('ari_username')
         ari_password = attrs.get('ari_password')
-        ari_port = attrs.get('ari_port')
+        ari_port = attrs.get('ari_port') or 8088
 
-        ami_validation = self._validate_ami_credentials(host, ami_port, ami_username, ami_secret)
-        ari_validation = self._validate_ari_credentials(host, ari_port, ari_username, ari_password)
+        ami_validation = self._validate_ami_credentials(
+            host=host,
+            username=ami_username,
+            secret=ami_secret,
+            port=ami_port,
+        )
+        ari_validation = self._validate_ari_credentials(
+            host=host,
+            username=ari_username,
+            password= ari_password,
+            port=ari_port,
+        )
 
         if not ami_validation or not ari_validation:
             raise serializers.ValidationError("Invalid Asterisk credentials.")
@@ -211,5 +240,5 @@ class TenantSerializer(serializers.ModelSerializer):
                 counter += 1
             
             validated_data['slug'] = slug
-        
+            validated_data['ari_app_name'] = f"{slug}-app"
         return super().create(validated_data)

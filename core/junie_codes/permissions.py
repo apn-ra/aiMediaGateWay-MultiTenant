@@ -275,7 +275,10 @@ class TenantPermission(permissions.BasePermission, DynamicPermissionMixin):
         # Ensure user is authenticated
         if not request.user or not request.user.is_authenticated:
             return False
-        
+
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+
         # Ensure tenant context is available (set by TenantAPIMiddleware)
         if not hasattr(request, 'tenant') or not request.tenant:
             logger.warning(f"No tenant context for user {request.user.username}")
@@ -348,7 +351,7 @@ class TenantAdminPermission(TenantPermission):
         # Check if user has admin role
         try:
             user_profile = UserProfile.objects.get(user=request.user)
-            if user_profile.role not in ['admin', 'tenant_admin']:
+            if user_profile.role not in ['admin', 'tenant_admin', 'super_admin']:
                 logger.debug(f"User {request.user.username} denied admin access - role: {user_profile.role}")
                 return False
                 
@@ -512,7 +515,7 @@ class TenantResourcePermission(TenantPermission):
             user_role = user_profile.role
             
             # Admin users have full access
-            if user_role in ['admin', 'tenant_admin']:
+            if user_role in ['admin', 'tenant_admin', 'super_admin']:
                 return True
             
             # Operators can read and write call-related data
@@ -551,18 +554,18 @@ class TenantResourcePermission(TenantPermission):
             user_role = user_profile.role
             
             # Admin users have full access to all objects
-            if user_role in ['admin', 'tenant_admin']:
+            if user_role in ['admin', 'tenant_admin', 'super_admin']:
                 return True
             
             # For sensitive configuration objects, only admins have access
             if obj.__class__.__name__ in ['SystemConfiguration', 'Tenant']:
-                return user_role in ['admin', 'tenant_admin']
+                return user_role in ['admin', 'tenant_admin', 'super_admin']
             
             # For user-related objects, allow access to own data or admin access
             if obj.__class__.__name__ in ['User', 'UserProfile']:
                 if obj == request.user or (hasattr(obj, 'user') and obj.user == request.user):
                     return True
-                return user_role in ['admin', 'tenant_admin']
+                return user_role in ['admin', 'tenant_admin', 'super_admin']
             
             # For other objects, apply role-based permissions
             if user_role in ['operator', 'call_operator']:

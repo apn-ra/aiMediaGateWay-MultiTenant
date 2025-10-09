@@ -36,6 +36,14 @@ class Tenant(models.Model):
     def __str__(self):
         return self.name
 
+
+class TenantLog(models.Model):
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='logs')
+    level = models.CharField(max_length=10)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
 class CallSessionManager(models.Manager):
     def get_active_sessions(self):
         return self.filter(status__in=['detected', 'answered', 'bridged', 'recording'])
@@ -171,6 +179,7 @@ class UserProfile(models.Model):
     ROLE_CHOICES = [
         ('super_admin', 'Super Administrator'),
         ('tenant_admin', 'Tenant Administrator'),
+        ('admin', 'System Administrator'),
         ('operator', 'Call Operator'),
         ('viewer', 'Call Viewer'),
     ]

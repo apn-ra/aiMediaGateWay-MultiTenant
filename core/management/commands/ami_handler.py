@@ -3,6 +3,7 @@
 # Created: 23/09/2025
 
 import asyncio
+import json
 import logging
 import signal
 from asgiref.sync import sync_to_async
@@ -16,18 +17,23 @@ logger = logging.getLogger(__name__)
 
 class Command(BaseCommand):
     help = "Start the Asterisk AMI event listener"
-    group_name= "tenants_asterisk_events"
+    group_name= "tenants_asterisk_event"
     tasks = {}
+
     def add_arguments(self, parser):
         parser.add_argument(
             "--tenant", nargs="*", type=str,
             help="Optional list of tenant IDs to register (default = all active)",
         )
 
-    async def new_tenant(self, message):
-        logger.info(f"New tenant: {message}")
-        # self.tasks[tenant_id] = AsteriskEventHandlers(tenant_id=tenant_id)
-        # await self.tasks[tenant_id].initialize()
+    async def process_tenant(self, message):
+        if message["type"] in ["new_tenant", "enable_tenant"]:
+            if message["tenant"]["id"] not in self.tasks:
+                self.tasks[message['tenant']['id']] = AsteriskEventHandlers(tenant_id=message['tenant']['id'])
+                await self.tasks[message['tenant']['id']].initialize()
+        elif message["type"] == "disable_tenant":
+            await self.tasks[message['tenant']['id']].disconnect()
+            del self.tasks[message['tenant']['id']]
 
     async def handle_async(self, *args, **options):
         channel_layer = get_channel_layer()
@@ -36,7 +42,6 @@ class Command(BaseCommand):
         await channel_layer.group_add(self.group_name, channel_name)
 
         tenants = await sync_to_async(list)(Tenant.objects.filter(is_active=True))
-
 
         stop_event = asyncio.Event()
 
@@ -55,11 +60,22 @@ class Command(BaseCommand):
             await self.tasks[tenant.id].initialize()
 
         try:
-            message = await channel_layer.receive(channel_name)
-            await self.new_tenant(message)
-            logger.info("AMI & ARI event listener started.")
-            await stop_event.wait()  # Wait until a shutdown signal is received
+            # Main loop
+            while not stop_event.is_set():
+                try:
+                    message = await asyncio.wait_for(
+                        channel_layer.receive(channel_name),
+                        timeout=1.0,  # check every second for stop_event
+                    )
+                    await self.process_tenant(message)
+                except asyncio.TimeoutError:
+                    # No message, loop again to check stop_event
+                    continue
+
+                except Exception as e:
+                    logger.exception(f"Error while handling message: {e}")
         finally:
+            tenants = await sync_to_async(list)(Tenant.objects.filter(is_active=True))
             logger.info("Shutting down gracefully...")
             for tenant in tenants:
                 await self.tasks[tenant.id].disconnect()
